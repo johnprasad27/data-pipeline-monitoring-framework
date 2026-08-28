@@ -1,0 +1,16 @@
+customer_name,product_name,quantity,amount,sale_date
+John Smith,Laptop Computer,1,1299.99,2026-08-20
+Sarah Johnson,Wireless Mouse,3,45.97,2026-08-20
+Michael Brown,USB-C Cable,5,24.95,2026-08-19
+Emily Davis,Monitor 27 inch,2,599.98,2026-08-19
+Robert Wilson,Mechanical Keyboard,4,319.96,2026-08-18
+Jessica Martinez,HDMI Cable,10,49.90,2026-08-18
+David Anderson,Portable SSD 1TB,2,299.98,2026-08-17
+Lisa Taylor,Desk Lamp LED,6,119.94,2026-08-17
+James Thomas,USB Hub 7-Port,8,159.92,2026-08-16
+Patricia Jackson,Webcam HD 1080p,3,149.97,2026-08-16
+Christopher White,Mousepad Large,12,59.88,2026-08-15
+Mary Harris,Screen Protector,15,29.85,2026-08-15
+Mark Martin,External Hard Drive 2TB,1,89.99,2026-08-14
+Nancy Thompson,Laptop Stand,7,139.93,2026-08-14
+Paul Garcia,USB Charging Cable,20,39.80,2026-08-13

@@ -1,0 +1,37 @@
+[
+  {
+    "customer_name": "Alice Walker",
+    "product_name": "Bluetooth Headphones",
+    "quantity": 2,
+    "amount": 199.98,
+    "sale_date": "2026-08-22"
+  },
+  {
+    "customer_name": "Brian Lee",
+    "product_name": "Smartphone Case",
+    "quantity": 5,
+    "amount": 74.95,
+    "sale_date": "2026-08-21"
+  },
+  {
+    "customer_name": "Cynthia Green",
+    "product_name": "Wireless Charger",
+    "quantity": 3,
+    "amount": 89.97,
+    "sale_date": "2026-08-20"
+  },
+  {
+    "customer_name": "Daniel King",
+    "product_name": "Noise Cancelling Earbuds",
+    "quantity": 1,
+    "amount": 129.99,
+    "sale_date": "2026-08-19"
+  },
+  {
+    "customer_name": "Evelyn Scott",
+    "product_name": "Laptop Sleeve 15 inch",
+    "quantity": 4,
+    "amount": 119.96,
+    "sale_date": "2026-08-18"
+  }
+]
