@@ -65,7 +65,7 @@ CREATE TABLE pipeline_execution (
     source_type VARCHAR(10) NOT NULL,
     start_time TIMESTAMP NOT NULL,
     end_time TIMESTAMP,
-    execution_duration_seconds INTEGER,
+    execution_duration_seconds NUMERIC(12, 3),
     status VARCHAR(20) NOT NULL,
     rows_processed INTEGER DEFAULT 0,
     retry_count INTEGER DEFAULT 0,
@@ -74,10 +74,13 @@ CREATE TABLE pipeline_execution (
     
     -- Constraints for data integrity
     CONSTRAINT chk_source_type CHECK (source_type IN ('CSV', 'API')),
-    CONSTRAINT chk_status CHECK (status IN ('SUCCESS', 'FAILED', 'RUNNING')),
+    CONSTRAINT chk_status CHECK (status IN ('SUCCESS', 'FAILED', 'RUNNING', 'RETRYING')),
     CONSTRAINT chk_rows_processed_non_negative CHECK (rows_processed >= 0),
     CONSTRAINT chk_retry_count_non_negative CHECK (retry_count >= 0)
 );
+
+ALTER TABLE pipeline_execution
+    ADD COLUMN IF NOT EXISTS execution_log TEXT;
 
 -- Performance indexes for dashboard and monitoring queries
 CREATE INDEX idx_pipeline_execution_pipeline_name ON pipeline_execution(pipeline_name);

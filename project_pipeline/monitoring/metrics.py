@@ -16,13 +16,13 @@ from monitoring import queries
 logger = logging.getLogger(__name__)
 
 
-def gather_kpis(db: Database) -> Dict[str, int]:
+def gather_kpis(db: Database, pipeline_name: str | None = None) -> Dict[str, int]:
     """Return a dict of KPI values for the dashboard."""
     try:
-        total = queries.total_executions(db)
-        success = queries.successful_executions(db)
-        failed = queries.failed_executions(db)
-        rows = queries.total_rows_processed(db)
+        total = queries.total_executions(db, pipeline_name)
+        success = queries.successful_executions(db, pipeline_name)
+        failed = queries.failed_executions(db, pipeline_name)
+        rows = queries.total_rows_processed(db, pipeline_name)
         return {
             "total_executions": total,
             "successful_executions": success,
@@ -34,19 +34,29 @@ def gather_kpis(db: Database) -> Dict[str, int]:
         raise
 
 
-def get_latest_execution(db: Database) -> Dict[str, any] | None:
+def get_latest_execution(db: Database, pipeline_name: str | None = None) -> Dict[str, any] | None:
     try:
+        if pipeline_name:
+            return queries.get_latest_execution(db, pipeline_name)
         return queries.latest_pipeline_execution(db)
     except DatabaseError as e:
         logger.error("Error fetching latest execution: %s", e)
         raise
 
 
-def get_execution_history(db: Database, limit: int | None = 100) -> List[Dict[str, any]]:
+def get_execution_history(db: Database, limit: int | None = 100, pipeline_name: str | None = None) -> List[Dict[str, any]]:
     try:
-        return queries.execution_history(db, limit)
+        return queries.execution_history(db, limit=limit, pipeline_name=pipeline_name)
     except DatabaseError as e:
         logger.error("Error fetching execution history: %s", e)
+        raise
+
+
+def get_pipeline_failures(db: Database, pipeline_name: str, limit: int | None = 20) -> List[Dict[str, any]]:
+    try:
+        return queries.get_pipeline_failures(db, pipeline_name, limit)
+    except DatabaseError as e:
+        logger.error("Error fetching pipeline failures: %s", e)
         raise
 
 

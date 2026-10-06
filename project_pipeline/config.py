@@ -31,3 +31,17 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "CHANGE_ME")
 # API Configuration
 # =====================================================================
 API_BASE_URL = os.getenv("API_BASE_URL", "https://dummyjson.com/carts")
+
+# =====================================================================
+# Continuous execution and monitoring configuration
+# =====================================================================
+PIPELINE_INTERVAL_SECONDS = max(
+	1, int(os.getenv("PIPELINE_INTERVAL_SECONDS", "60"))
+)
+MAX_RETRIES = max(0, int(os.getenv("MAX_RETRIES", "3")))
+DASHBOARD_REFRESH_SECONDS = max(
+	2, int(os.getenv("DASHBOARD_REFRESH_SECONDS", "3"))
+)
+PIPELINE_STATUS_EVENT_CHANNEL = os.getenv("PIPELINE_STATUS_EVENT_CHANNEL", "pipeline_status")
+CSV_PIPELINE_PATH = BASE_DIR / os.getenv("CSV_PIPELINE_PATH", "data/csv/sales.csv")
+LOG_FILE = BASE_DIR / os.getenv("LOG_FILE", "logs/pipeline.log")

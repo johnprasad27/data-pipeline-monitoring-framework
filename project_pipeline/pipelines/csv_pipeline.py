@@ -83,7 +83,7 @@ def log_pipeline_execution(
         raise
 
 
-def run_csv_pipeline(csv_file_path: str | Path) -> dict:
+def run_csv_pipeline(csv_file_path: str | Path, retry_count: int = 0) -> dict:
     """
     Execute the complete CSV ETL pipeline.
     
@@ -118,11 +118,20 @@ def run_csv_pipeline(csv_file_path: str | Path) -> dict:
     status = "FAILED"  # Default to FAILED; set to SUCCESS if all steps pass
     
     db = Database()
+    execution_id = None
     
     try:
         # Connect to database
         db.connect()
+        execution_id = db.start_pipeline_execution(
+            pipeline_name, source_type, start_time, retry_count
+        )
         logger.info("CSV pipeline started")
+
+        def update_progress(rows_loaded: int) -> None:
+            db.update_pipeline_execution(
+                execution_id, "RUNNING", rows_loaded, start_time
+            )
         
         # Extract: Read CSV
         df = read_csv(csv_file_path)
@@ -136,7 +145,7 @@ def run_csv_pipeline(csv_file_path: str | Path) -> dict:
         df = transform_sales_data(df)
         
         # Load: Insert into database
-        rows_processed = load_sales_data(df, db)
+        rows_processed = load_sales_data(df, db, update_progress)
         
         # Success
         status = "SUCCESS"
@@ -155,31 +164,38 @@ def run_csv_pipeline(csv_file_path: str | Path) -> dict:
         logger.exception(error_message)
     
     finally:
-        # Log execution and close connection
+        # Finalize the row created when the pipeline started.
         end_time = datetime.now()
         
-        try:
-            log_pipeline_execution(
-                db,
-                pipeline_name,
-                source_type,
-                status,
-                rows_processed,
-                start_time,
-                end_time,
-                error_message,
-            )
-        except DatabaseError as e:
-            logger.error(f"Failed to log pipeline execution: {e}")
+        if execution_id is not None:
+            try:
+                db.update_pipeline_execution(
+                    execution_id,
+                    status,
+                    rows_processed,
+                    start_time,
+                    end_time,
+                    error_message,
+                    retry_count,
+                    "pipeline completed successfully"
+                    if status == "SUCCESS"
+                    else f"pipeline failed: {error_message}",
+                    pipeline_name=pipeline_name,
+                )
+            except DatabaseError as e:
+                logger.error(f"Failed to log pipeline execution: {e}")
         
         db.close()
     
     return {
+        "pipeline_name": pipeline_name,
         "status": status,
         "rows_processed": rows_processed,
         "error_message": error_message,
         "start_time": start_time,
         "end_time": end_time,
+        "execution_id": execution_id,
+        "retry_count": retry_count,
     }
 
 

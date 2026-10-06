@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 
@@ -173,7 +174,11 @@ def transform_sales_data(df: pd.DataFrame) -> pd.DataFrame:
         raise ETLError(f"Transformation failed: {e}") from e
 
 
-def load_sales_data(df: pd.DataFrame, db) -> int:
+def load_sales_data(
+    df: pd.DataFrame,
+    db,
+    progress_callback: Callable[[int], None] | None = None,
+) -> int:
     """
     Load transformed data into the sales_data table.
     
@@ -210,6 +215,9 @@ def load_sales_data(df: pd.DataFrame, db) -> int:
             
             db.execute(query, params, commit=False)
             rows_loaded += 1
+
+            if progress_callback is not None:
+                progress_callback(rows_loaded)
         
         # Commit all rows at once
         db.connection.commit()

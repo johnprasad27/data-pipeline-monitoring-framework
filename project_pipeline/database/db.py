@@ -14,7 +14,10 @@ This module is designed to be imported by other packages
 psycopg2 connection/cursor objects to the rest of the codebase.
 """
 
+import json
 import logging
+from datetime import datetime
+
 import psycopg2
 import psycopg2.extras
 
@@ -80,6 +83,84 @@ class Database:
             logger.exception("Unexpected error while connecting to database.")
             raise DatabaseError(f"Unexpected connection error: {e}") from e
 
+    def ensure_monitoring_schema(self):
+        """Apply additive monitoring changes without deleting execution history."""
+        self._ensure_connection()
+        try:
+            self.execute(
+                "ALTER TABLE pipeline_execution "
+                "ADD COLUMN IF NOT EXISTS execution_log TEXT",
+                commit=False,
+            )
+            self.execute(
+                "ALTER TABLE pipeline_execution DROP CONSTRAINT IF EXISTS chk_status",
+                commit=False,
+            )
+            self.execute(
+                "ALTER TABLE pipeline_execution ADD CONSTRAINT chk_status "
+                "CHECK (status IN ('SUCCESS', 'FAILED', 'RUNNING', 'RETRYING'))",
+                commit=False,
+            )
+            self.execute(
+                "ALTER TABLE pipeline_execution ALTER COLUMN execution_duration_seconds "
+                "TYPE NUMERIC(12, 3) USING execution_duration_seconds::NUMERIC",
+                commit=False,
+            )
+            self.connection.commit()
+            logger.info("Monitoring schema is ready.")
+        except DatabaseError:
+            self.connection.rollback()
+            logger.exception("Database error while applying monitoring schema changes.")
+            raise
+
+    @staticmethod
+    def build_status_notification(
+        pipeline_name: str,
+        status: str,
+        execution_id: int | None = None,
+        retry_count: int = 0,
+    ) -> str:
+        """Build a compact PostgreSQL notification payload for pipeline state changes."""
+        payload = {
+            "pipeline_name": pipeline_name,
+            "status": status,
+            "execution_id": execution_id,
+            "retry_count": retry_count,
+        }
+        return json.dumps(payload, separators=(",", ":"))
+
+    def notify_pipeline_status(
+        self,
+        pipeline_name: str,
+        status: str,
+        execution_id: int | None = None,
+        retry_count: int = 0,
+    ) -> None:
+        """Send a lightweight notification whenever a pipeline execution changes state."""
+        if self.connection is None or self.connection.closed:
+            return
+
+        payload = self.build_status_notification(
+            pipeline_name=pipeline_name,
+            status=status,
+            execution_id=execution_id,
+            retry_count=retry_count or 0,
+        )
+
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                "SELECT pg_notify(%s, %s)",
+                (config.PIPELINE_STATUS_EVENT_CHANNEL, payload),
+            )
+            self.connection.commit()
+        except Exception as exc:
+            logger.warning("Failed to publish pipeline status notification: %s", exc)
+            try:
+                self.connection.rollback()
+            except Exception:
+                pass
+
     def close(self):
         """Close the active database connection, if one exists."""
         if self.connection is not None:
@@ -141,6 +222,112 @@ class Database:
         finally:
             if cursor is not None:
                 cursor.close()
+
+    def start_pipeline_execution(
+        self,
+        pipeline_name,
+        source_type,
+        start_time=None,
+        retry_count=0,
+    ):
+        """Create a visible RUNNING execution and return its execution ID."""
+        self._ensure_connection()
+        cursor = None
+        start_time = start_time or datetime.now()
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                """
+                INSERT INTO pipeline_execution
+                    (pipeline_name, source_type, status, rows_processed,
+                     start_time, execution_duration_seconds, retry_count,
+                     execution_log)
+                VALUES (%s, %s, 'RUNNING', 0, %s, 0, %s, %s)
+                RETURNING execution_id
+                """,
+                (
+                    pipeline_name,
+                    source_type,
+                    start_time,
+                    retry_count,
+                    "pipeline started",
+                ),
+            )
+            execution_id = cursor.fetchone()[0]
+            self.connection.commit()
+            self.notify_pipeline_status(
+                pipeline_name=pipeline_name,
+                status="RUNNING",
+                execution_id=execution_id,
+                retry_count=retry_count,
+            )
+            return execution_id
+        except psycopg2.Error as e:
+            self.connection.rollback()
+            logger.error("Failed to start pipeline execution: %s", e)
+            raise DatabaseError(f"Failed to start pipeline execution: {e}") from e
+        finally:
+            if cursor is not None:
+                cursor.close()
+
+    def update_pipeline_execution(
+        self,
+        execution_id,
+        status,
+        rows_processed,
+        start_time,
+        end_time=None,
+        error_message=None,
+        retry_count=None,
+        execution_log=None,
+        pipeline_name=None,
+    ):
+        """Update the existing execution row and commit it for dashboard polling."""
+        duration_seconds = round(
+            ((end_time or datetime.now()) - start_time).total_seconds(), 3
+        )
+        query = """
+            UPDATE pipeline_execution
+            SET status = %s,
+                rows_processed = %s,
+                execution_duration_seconds = %s,
+                end_time = %s,
+                error_message = %s,
+                retry_count = COALESCE(%s, retry_count),
+                execution_log = COALESCE(%s, execution_log)
+            WHERE execution_id = %s
+        """
+        params = (
+            status,
+            rows_processed,
+            duration_seconds,
+            end_time,
+            error_message,
+            retry_count,
+            execution_log,
+            execution_id,
+        )
+        self.execute(query, params, commit=True)
+
+        if pipeline_name is not None:
+            self.notify_pipeline_status(
+                pipeline_name=pipeline_name,
+                status=status,
+                execution_id=execution_id,
+                retry_count=retry_count or 0,
+            )
+
+    def append_execution_log(self, execution_id, message):
+        """Append a non-sensitive lifecycle message to an execution row."""
+        self.execute(
+            """
+            UPDATE pipeline_execution
+            SET execution_log = CONCAT_WS(E'\\n', execution_log, %s)
+            WHERE execution_id = %s
+            """,
+            (message, execution_id),
+            commit=True,
+        )
 
     def fetch_one(self, query, params=None):
         """
