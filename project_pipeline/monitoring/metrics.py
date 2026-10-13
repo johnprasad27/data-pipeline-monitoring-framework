@@ -44,9 +44,17 @@ def get_latest_execution(db: Database, pipeline_name: str | None = None) -> Dict
         raise
 
 
-def get_execution_history(db: Database, limit: int | None = 100, pipeline_name: str | None = None) -> List[Dict[str, any]]:
+def get_execution_history(
+    db: Database,
+    limit: int | None = 100,
+    pipeline_name: str | None = None,
+    status: str | None = None,
+    since: str | datetime | None = None,
+) -> List[Dict[str, any]]:
     try:
-        return queries.execution_history(db, limit=limit, pipeline_name=pipeline_name)
+        return queries.execution_history(
+            db, limit=limit, pipeline_name=pipeline_name, status=status, since=since
+        )
     except DatabaseError as e:
         logger.error("Error fetching execution history: %s", e)
         raise

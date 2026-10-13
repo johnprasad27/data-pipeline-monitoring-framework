@@ -532,6 +532,11 @@ def resolve_pipeline_runner(handler_name: str, function_name: str | None = None)
         function_name = f"run_{module_stem}"
     try:
         module = importlib.import_module(module_path)
+        if getattr(module, "__file__", None):
+            try:
+                module = importlib.reload(module)
+            except Exception:
+                pass
     except ModuleNotFoundError as exc:
         if exc.name == module_path or module_path.startswith(f"{exc.name}."):
             raise ValueError(

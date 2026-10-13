@@ -108,6 +108,18 @@ def run_api_pipeline(
     db = Database()
     execution_id = None
 
+    def _log_task(name: str, status: str, t_start: datetime, error: str | None = None) -> None:
+        """Best-effort stage logging; failures must not break the pipeline."""
+        if execution_id is None:
+            return
+        try:
+            db.log_task_execution(
+                execution_id, pipeline_name, name, status,
+                started_at=t_start, ended_at=datetime.now(), error_message=error,
+            )
+        except Exception:
+            logger.debug("Task stage logging failed for %s/%s", pipeline_name, name)
+
     try:
         db.connect()
         execution_id = db.start_pipeline_execution(
@@ -116,7 +128,10 @@ def run_api_pipeline(
         logger.info("API pipeline started")
 
         api_url = (source_config or {}).get("url") or config.API_BASE_URL
-        client = APIClient(base_url=api_url)
+        import importlib
+        import api.api_client
+        importlib.reload(api.api_client)
+        client = api.api_client.APIClient(base_url=api_url)
 
         def update_progress(rows_loaded: int) -> None:
             db.update_pipeline_execution(
@@ -124,21 +139,30 @@ def run_api_pipeline(
             )
 
         # Extract
+        t0 = datetime.now()
         df = read_api_data(client)
+        _log_task("Extract", "SUCCESS", t0)
 
+        t0 = datetime.now()
         quality_report = evaluate_data_quality(df, check_duplicates=False)
         data_quality_score = quality_report["score"]
 
         # Validate
         df, validation_errors = validate_sales_data(df, check_duplicates=False)
         if validation_errors:
+            _log_task("Validate", "FAILED", t0, "; ".join(validation_errors))
             raise ETLError(f"Validation failed: {'; '.join(validation_errors)}")
+        _log_task("Validate", "SUCCESS", t0)
 
         # Transform
+        t0 = datetime.now()
         df = transform_sales_data(df)
+        _log_task("Transform", "SUCCESS", t0)
 
         # Load
+        t0 = datetime.now()
         rows_processed = load_sales_data(df, db, update_progress)
+        _log_task("Load", "SUCCESS", t0)
 
         status = "SUCCESS"
         logger.info("API pipeline completed successfully")
@@ -187,14 +211,14 @@ def run_api_pipeline(
         "pipeline_name": pipeline_name,
         "status": status,
         "rows_processed": rows_processed,
-        "error_message": error_message,
+        "error_message": error_message if status == "FAILED" else None,
         "start_time": start_time,
         "end_time": end_time,
         "execution_id": execution_id,
         "retry_count": retry_count,
-        "failure_type": failure_type,
-        "failure_category": failure_type,
-        "retryable": retryable,
+        "failure_type": failure_type if status == "FAILED" else None,
+        "failure_category": failure_type if status == "FAILED" else None,
+        "retryable": retryable if status == "FAILED" else None,
         "data_quality_score": data_quality_score,
         "freshness_status": freshness_status,
         "health_score": health_score,

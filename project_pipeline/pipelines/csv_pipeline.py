@@ -157,7 +157,19 @@ def run_csv_pipeline(
     
     db = Database()
     execution_id = None
-    
+
+    def _log_task(name: str, task_status: str, t_start: datetime, error: str | None = None) -> None:
+        """Best-effort stage logging; failures must not break the pipeline."""
+        if execution_id is None:
+            return
+        try:
+            db.log_task_execution(
+                execution_id, pipeline_name, name, task_status,
+                started_at=t_start, ended_at=datetime.now(), error_message=error,
+            )
+        except Exception:
+            logger.debug("Task stage logging failed for %s/%s", pipeline_name, name)
+
     try:
         # Connect to database
         db.connect()
@@ -167,6 +179,7 @@ def run_csv_pipeline(
         logger.info("CSV pipeline started")
 
         # Extract: Read CSV
+        t0 = datetime.now()
         configured_path = (source_config or {}).get("file_path")
         csv_path = Path(configured_path or csv_file_path or config.CSV_PIPELINE_PATH)
         if not csv_path.is_absolute():
@@ -176,6 +189,10 @@ def run_csv_pipeline(
         if not csv_path.is_relative_to(data_dir):
             raise ETLError("Invalid CSV configuration: source must be inside the project's data directory")
         source_frame = read_csv(csv_path)
+        _log_task("Extract", "SUCCESS", t0)
+
+        # Validate
+        t0 = datetime.now()
         df, quality_report = validate_csv_data(
             source_frame,
             (source_config or {}).get("quality_config"),
@@ -186,15 +203,22 @@ def run_csv_pipeline(
             else 100.0
         )
         if quality_report["data_quality_status"] == "FAIL":
+            _log_task("Validate", "FAILED", t0, "; ".join(quality_report["reasons"]) or "CSV schema validation failed")
             raise ETLError("; ".join(quality_report["reasons"]) or "CSV schema validation failed")
+        _log_task("Validate", "SUCCESS", t0)
         
         # Transform: Apply transformations
+        t0 = datetime.now()
         df = transform_sales_data(df)
+        _log_task("Transform", "SUCCESS", t0)
         
         # Load in one transaction so loaded-row counts match committed rows.
+        t0 = datetime.now()
         rows_processed = load_sales_data(df, db)
         if quality_report["reasons"] and not error_message:
             logger.warning("CSV rows rejected: %s", "; ".join(quality_report["reasons"]))
+        _log_task("Load", "SUCCESS", t0)
+
         status = "SUCCESS"
         logger.info("CSV pipeline completed: %s rows loaded", rows_processed)
     
@@ -285,14 +309,14 @@ def run_csv_pipeline(
         "pipeline_name": pipeline_name,
         "status": status,
         "rows_processed": rows_processed,
-        "error_message": error_message,
+        "error_message": error_message if status == "FAILED" else None,
         "start_time": start_time,
         "end_time": end_time,
         "execution_id": execution_id,
         "retry_count": retry_count,
-        "failure_type": failure_type,
-        "failure_category": failure_type,
-        "retryable": retryable,
+        "failure_type": failure_type if status == "FAILED" else None,
+        "failure_category": failure_type if status == "FAILED" else None,
+        "retryable": retryable if status == "FAILED" else None,
         "data_quality_score": data_quality_score,
         "freshness_status": freshness_status,
         "health_score": health_score,

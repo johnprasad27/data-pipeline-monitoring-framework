@@ -56,6 +56,56 @@ def _format_duration(row: dict) -> str:
             return f"{delta:.2f} s"
         except Exception:
             pass
+    return "0.00 s"
+
+
+format_duration = _format_duration
+
+
+def format_failure_category(
+    status: str | None,
+    failure_category: str | None,
+    retry_count: int = 0,
+) -> str:
+    """Format failure category for display:
+    - Terminally failed: show category (e.g. NETWORK_ERROR) or UNKNOWN
+    - Successful with no failure: show '—'
+    - Successful with recovered failure (retry_count > 0): show 'Recovered (<category>)'
+    - Retrying: show category
+    - Other/Running: show '—'
+    """
+    s = (status or "").upper()
+    cat = str(failure_category or "").strip()
+    if cat in {"-", "—", "None", "NULL"}:
+        cat = ""
+
+    if s == "SUCCESS":
+        if cat.startswith("Recovered (") and cat.endswith(")"):
+            return cat
+        if cat and cat not in {"UNKNOWN", "UNKNOWN_ERROR"} and retry_count > 0:
+            return f"Recovered ({cat})"
+        return "—"
+
+    if s in {"FAILED", "RETRYING"}:
+        if cat and cat not in {"-", "—"}:
+            return cat
+        return "UNKNOWN" if s == "FAILED" else "—"
+
+    if cat and cat not in {"UNKNOWN", "UNKNOWN_ERROR", "-", "—"}:
+        return cat
+    return "—"
+
+
+def format_retryable(status: str | None, retryable: bool | None) -> str:
+    """Format retryable status: only applicable for failed/retrying states."""
+    s = (status or "").upper()
+    if s == "SUCCESS":
+        return "—"
+    if retryable is None:
+        return "—"
+    return "YES" if retryable else "NO"
+
+
 def _status_pill(status: str) -> str:
     if not status:
         status = "UNKNOWN"
@@ -187,7 +237,7 @@ def main() -> None:
                     duration = _format_duration(pipeline) or "0.00 s"
                     retries = pipeline.get("retry_count") if pipeline.get("retry_count") is not None else 0
                     last = str(pipeline.get("created_at") or "")
-                    failure_category = pipeline.get("failure_category") or "-"
+                    failure_category = format_failure_category(status, pipeline.get("failure_category"), retries)
 
                     if status == "SUCCESS":
                         badge_html = "<span class='status-badge status-success'>SUCCESS</span>"
@@ -384,8 +434,12 @@ def main() -> None:
                 health_value = latest.get("health_score")
                 quality_value = latest.get("data_quality_score")
                 freshness_value = latest.get("freshness_status") or "STALE"
-                failure_category = latest.get("failure_category") or latest.get("failure_type") or "-"
-                retryable_text = "YES" if latest.get("retryable") else "NO"
+                failure_category = format_failure_category(
+                    status,
+                    latest.get("failure_category") or latest.get("failure_type"),
+                    retries,
+                )
+                retryable_text = format_retryable(status, latest.get("retryable"))
                 detail_cols = st.columns(5)
                 detail_cols[0].markdown(f"<div class='card'><strong>Health</strong><br>{health_value if health_value is not None else 'N/A'} / 100</div>", unsafe_allow_html=True)
                 detail_cols[1].markdown(f"<div class='card'><strong>Freshness</strong><br>{freshness_value}</div>", unsafe_allow_html=True)
@@ -424,23 +478,6 @@ def main() -> None:
                         )
                     ]
                     st.dataframe(pd.DataFrame(quality_rows), hide_index=True, width="stretch")
-
-                st.subheader(f"{title_label} Execution History")
-                history_rows = []
-                for item in history:
-                    history_rows.append({
-                        "Execution Time": item.get("created_at") or item.get("start_time") or "",
-                        "Status": item.get("status"),
-                        "Rows": item.get("rows_processed") or 0,
-                        "Duration": _format_duration(item),
-                        "Retries": item.get("retry_count") if item.get("retry_count") is not None else 0,
-                        "Failure Category": item.get("failure_category") or item.get("failure_type") or "-",
-                        "Error": item.get("error_message") or "",
-                    })
-                if history_rows:
-                    st.table(pd.DataFrame(history_rows))
-                else:
-                    st.info(f"No execution history for {title_label}.")
             else:
                 st.info(f"No execution data for {selected_pipeline} yet.")
 
@@ -499,56 +536,43 @@ def main() -> None:
         st.markdown("<div class='spacer'></div>", unsafe_allow_html=True)
 
         if selected_pipeline is None:
-            left, right = st.columns([2, 1])
-            with left:
-                st.subheader("Recent Executions")
-                recent = metrics.get_execution_history(db, limit=10)
-                if recent:
-                    rows = []
-                    for r in recent:
-                        rows.append({
-                            'Pipeline': r.get('pipeline_name'),
-                            'Status': r.get('status'),
-                            'Rows': r.get('rows_processed') or 0,
-                            'Duration': _format_duration(r),
-                            'Failure Category': r.get('failure_category') or r.get('failure_type') or '-',
-                            'Execution Time': r.get('created_at') or '',
-                        })
-                    st.table(pd.DataFrame(rows))
-                else:
-                    st.info('No executions yet.')
-
-            with right:
-                st.subheader('Failed Executions')
-                failed_runs = [r for r in (metrics.get_execution_history(db, limit=200) or []) if (r.get('status') or '').upper() == 'FAILED']
-                if failed_runs:
-                    for r in failed_runs[:10]:
-                        st.markdown(f"<div class='card'><div><strong>{r.get('pipeline_name')}</strong> <div class='muted small'>{r.get('created_at')}</div></div><div><strong>Failure Category:</strong> {r.get('failure_category') or r.get('failure_type') or 'UNKNOWN'}</div><div style='color:var(--danger)'>{r.get('error_message') or ''}</div></div>", unsafe_allow_html=True)
-                else:
-                    st.markdown("<div class='card'><div style='text-align:center'>🎉 No failed pipelines.<br/>All pipelines executed successfully.</div></div>", unsafe_allow_html=True)
-        else:
-            st.subheader("Recent Executions")
-            if history:
-                st.table(pd.DataFrame([
-                    {
-                        'Execution Time': row.get('created_at') or row.get('start_time') or '',
-                        'Status': row.get('status'),
-                        'Rows': row.get('rows_processed') or 0,
-                        'Duration': _format_duration(row),
-                        'Retries': row.get('retry_count') if row.get('retry_count') is not None else 0,
-                        'Failure Category': row.get('failure_category') or row.get('failure_type') or '-',
-                        'Error': row.get('error_message') or '',
-                    }
-                    for row in history[:10]
-                ]))
+            st.subheader('Failed Executions')
+            failed_runs = [r for r in (metrics.get_execution_history(db, limit=200) or []) if (r.get('status') or '').upper() == 'FAILED']
+            if failed_runs:
+                for r in failed_runs[:10]:
+                    exec_id = r.get('execution_id')
+                    exec_label = f"Execution #{exec_id} &nbsp; " if exec_id else ""
+                    st.markdown(
+                        f"<div class='card'>"
+                        f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
+                        f"<div><strong>{r.get('pipeline_name')}</strong> <span class='status-pill status-failed' style='margin-left:6px; font-size:10px;'>FAILED</span></div>"
+                        f"<div class='muted small'>{exec_label}{r.get('created_at')}</div>"
+                        f"</div>"
+                        f"<div style='margin-top:0.4rem;'><strong>Failure Category:</strong> {r.get('failure_category') or r.get('failure_type') or 'UNKNOWN'}</div>"
+                        f"<div style='color:var(--danger); margin-top:0.2rem;'>{r.get('error_message') or ''}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
             else:
-                st.info('No executions yet.')
-
+                st.markdown("<div class='card'><div style='text-align:center'>🎉 No failed pipelines.<br/>All pipelines executed successfully.</div></div>", unsafe_allow_html=True)
+        else:
             st.subheader('Failed Executions')
             failed_runs = metrics.get_pipeline_failures(db, selected_pipeline, limit=20)
             if failed_runs:
                 for r in failed_runs[:10]:
-                    st.markdown(f"<div class='card'><div><strong>{r.get('pipeline_name')}</strong> <div class='muted small'>{r.get('created_at')}</div></div><div><strong>Failure Category:</strong> {r.get('failure_category') or r.get('failure_type') or 'UNKNOWN'}</div><div style='color:var(--danger)'>{r.get('error_message') or ''}</div></div>", unsafe_allow_html=True)
+                    exec_id = r.get('execution_id')
+                    exec_label = f"Execution #{exec_id} &nbsp; " if exec_id else ""
+                    st.markdown(
+                        f"<div class='card'>"
+                        f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
+                        f"<div><strong>{r.get('pipeline_name')}</strong> <span class='status-pill status-failed' style='margin-left:6px; font-size:10px;'>FAILED</span></div>"
+                        f"<div class='muted small'>{exec_label}{r.get('created_at')}</div>"
+                        f"</div>"
+                        f"<div style='margin-top:0.4rem;'><strong>Failure Category:</strong> {r.get('failure_category') or r.get('failure_type') or 'UNKNOWN'}</div>"
+                        f"<div style='color:var(--danger); margin-top:0.2rem;'>{r.get('error_message') or ''}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
             else:
                 st.markdown("<div class='card'><div style='text-align:center'>🎉 No failed executions for this pipeline.</div></div>", unsafe_allow_html=True)
 

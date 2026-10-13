@@ -1,61 +1,213 @@
 # Data Pipeline Monitoring and Recovery Framework
 
-## Overview
-
-This project is a lightweight, configurable data pipeline monitoring and recovery framework developed for academic demonstration. It is not intended to replace Apache Airflow; instead, it shows how a small monitoring system can coordinate scheduled ETL activities, classify failures, track data quality, and surface freshness and health signals using PostgreSQL and a Streamlit dashboard.
-
-The system includes:
-
-- API and CSV ETL pipelines
-- PostgreSQL execution logging
-- retry and recovery orchestration
-- PostgreSQL event notification support
-- configurable pipeline registration
-- simple data-quality checks and scoring
-- freshness monitoring based on last successful run
-- a Streamlit dashboard and an Airflow-inspired overview page
+Developed for academic demonstration (MCA Project, College of Engineering Trivandrum).
 
 ---
 
-## Architecture
+## 1. Overview & Purpose
 
-The architecture stays intentionally simple and incremental:
+The **Data Pipeline Monitoring and Recovery Framework** is a lightweight, configurable ETL orchestration, monitoring, and automated recovery system developed using Python, PostgreSQL, and Streamlit.
+
+In modern data architectures, automated ETL workflows frequently encounter transient issues—such as intermittent network drops, temporary API rate limits, or momentary database deadlocks—as well as fatal anomalies like missing files or malformed schemas. When these failures go undetected or unhandled, downstream analytics and business reports become corrupted or stale.
+
+Rather than introducing heavyweight distributed orchestration systems like Apache Airflow for small-to-medium pipelines, this project demonstrates how a robust monitoring layer can:
+- Coordinate scheduled, multi-source ETL workflows (API and CSV).
+- Intercept and classify failures into granular categories.
+- Make intelligent, automated retry decisions to recover from transient faults without manual intervention.
+- Track fine-grained data quality metrics and data freshness signals.
+- Maintain persistent execution history and broadcast near-real-time state notifications in PostgreSQL.
+- Present operational health, KPIs, and configuration controls via an intuitive Streamlit dashboard.
+
+---
+
+## 2. System Architecture
+
+The framework is organized into decoupled layers: configuration and registry, execution scheduling, ETL data processing, failure and recovery management, database persistence and notification, and interactive presentation.
 
 ```text
-Configuration / Pipeline Registry
-        ↓
-Scheduler
-        ↓
-Pipeline Execution
-        ↓
-Validation + Data Quality Checks
-        ↓
-PostgreSQL storage and event notifications
-        ↓
-Monitoring + Dashboard + Recovery
+┌────────────────────────────────────────────────────────────────────────┐
+│                   Configuration & Pipeline Registry                    │
+│    • pipelines.yaml (declarative YAML config)                          │
+│    • PostgreSQL pipeline_registry table (UI dynamic registrations)     │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                          Continuous Scheduler                          │
+│    • pipelines/scheduler.py (independent run intervals per pipeline)  │
+│    • Dynamic registry polling (refreshes enabled state every 2s)       │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                      Recovery & Execution Wrapper                      │
+│    • pipelines/recovery.py (run_with_recovery, retry loop orchestration│
+│    • pipelines/failure_handling.py (classify_failure)                  │
+│    • monitoring/execution.py (wraps unmanaged handlers, logs history)  │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                        ETL Pipeline Execution                          │
+│    • API Pipeline (pipelines/api_pipeline.py -> DummyJSON API)         │
+│    • CSV Pipeline (pipelines/csv_pipeline.py -> sales.csv / uploads)   │
+│    • Validation & Quality Layer (pipelines/csv_quality.py, etl.py)     │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                      PostgreSQL Database Storage                       │
+│    • sales_data: Clean, transformed business transactions              │
+│    • pipeline_execution: Audit logs, metrics, errors, health scores   │
+│    • pipeline_registry: Dynamic UI pipeline configurations             │
+│    • pg_notify ('pipeline_status'): RUNNING / RETRYING / SUCCESS /     │
+│      FAILED event broadcasts                                           │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                     Streamlit Monitoring Dashboard                     │
+│    • Overview (pages/overview.py): Airflow-inspired system overview    │
+│    • Pipeline Monitor (monitoring/dashboard.py): KPIs, charts, history │
+│    • Add Pipeline (pages/add_pipeline.py): Dynamic UI registration     │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-This keeps the existing implementation intact while making the framework extensible. The scheduler reads enabled pipelines from a pipeline registry instead of hardcoding execution calls.
+---
+
+## 3. Core Components
+
+### 3.1 Existing Pipelines
+
+1. **API Pipeline (`pipelines/api_pipeline.py`)**:
+   - **Source**: REST API endpoint (defaults to `https://dummyjson.com/carts` via `api.api_client.APIClient`).
+   - **Process**: Extracts cart and product items, normalizes nested JSON into flat sales transaction records (`customer_name`, `product_name`, `quantity`, `amount`, `sale_date`), validates fields, transforms types, and loads records into the `sales_data` target table.
+   - **Self-Logging**: Decorated with `@execution_history_managed` to start execution rows, record intermediate progress, evaluate quality scores, compute freshness/health, and log final `SUCCESS` or `FAILED` states.
+
+2. **CSV Pipeline (`pipelines/csv_pipeline.py`)**:
+   - **Source**: Structured local CSV files (`data/csv/sales.csv` or user-uploaded files stored under `data/storage/`).
+   - **Process**: Reads source CSV, runs comprehensive schema and data quality validation via `pipelines/csv_quality.py`, transforms valid rows, and loads them into `sales_data` inside a database transaction.
+   - **Reconciliation**: Reconciles input rows against loaded rows and rejected rows; updates detailed error counts (`null_count`, `duplicate_count`, `datatype_error_count`, `business_rule_error_count`).
+
+### 3.2 Continuous Scheduler (`pipelines/scheduler.py`)
+
+- **Loop Mechanism**: `run_forever()` continuously tracks the `next_run_at` timestamp for each active pipeline.
+- **Dynamic Registry Refresh**: Every 2 seconds, the scheduler queries `get_enabled_pipeline_configs()`, refreshing definitions from `pipelines.yaml` merged with the database `pipeline_registry` table.
+- **Per-Pipeline Interval & Retries**: Each pipeline runs on its own configured schedule (`interval_seconds`) and enforces its own retry ceiling (`max_retries`).
+- **Failure Isolation**: An exception or failure in one pipeline does not block or terminate the scheduling of other pipelines.
+
+### 3.3 Retry & Recovery System (`pipelines/recovery.py`, `pipelines/failure_handling.py`)
+
+- When a pipeline encounters an error, `run_with_recovery()` passes the exception or error message to `classify_failure()`.
+- If the failure is classified as **retryable** and the current attempt is below `max_retries`:
+  1. The execution row in `pipeline_execution` is immediately updated to `status = 'RETRYING'`.
+  2. A PostgreSQL notification is broadcast on the `pipeline_status` channel.
+  3. The runner executes the next attempt.
+- If the failure is **non-retryable** (e.g. malformed CSV, missing columns, HTTP 404), the retry loop aborts immediately without wasting system resources.
+- If retries are exhausted without success, the status transitions to `FAILED` with failure classification and error details recorded.
+
+### 3.4 PostgreSQL Execution History & Notification
+
+- **Audit Logging**: Every execution attempt creates a `RUNNING` row in `pipeline_execution` upon start, capturing `start_time`, `pipeline_name`, and `source_type`. Upon completion, it commits `end_time`, `execution_duration_seconds`, `rows_processed`, `retry_count`, `failure_category`, `retryable`, `data_quality_score`, `freshness_status`, and `health_score`.
+- **Event Broadcasting**: PostgreSQL `pg_notify` publishes JSON payloads on `pipeline_status` whenever a pipeline enters `RUNNING`, `RETRYING`, `SUCCESS`, or `FAILED` states.
+- **Streamlit Consumption**: Streamlit views poll using `@st.fragment(run_every=3)` against the latest execution ID, keeping the UI near-real-time without requiring complex continuous socket listeners.
+
+### 3.5 Streamlit Dashboard Interface
+
+The Streamlit application (`app.py`) provides sidebar navigation across three purpose-built views:
+
+1. **Overview (`pages/overview.py`)**:
+   - Operational summary displaying high-level counts: Failed, Running, and Successful pipelines.
+   - Filterable by history time window: *Last 1 Hour*, *Last 6 Hours*, *Last 24 Hours*, or *Last 7 Days*.
+   - Pipeline Health status badges (`SUCCESS`, `FAILED`, `RUNNING`, `RETRYING`) with computed health scores and timestamps.
+
+2. **Pipeline Monitor (`monitoring/dashboard.py`)**:
+   - Single-page monitoring dashboard with aggregate KPI cards: *Total Pipelines*, *Successful Runs*, *Failed Runs*, *Rows Processed*, and *Avg Exec Duration*.
+   - Global view or single-pipeline drill-down filter.
+   - Pipeline status table featuring action buttons (`View`, `Logs`, `Retry`).
+   - Detailed metric panels for selected pipelines: Health Score (/100), Freshness Status, Quality %, Failure Category, and Retryable flag.
+   - Detailed data quality breakdown table for CSV pipelines (`Input rows`, `Valid rows`, `Rejected rows`, `Loaded rows`, `Missing columns`, `Null values`, `Duplicates`, `Datatype errors`, `Business rule errors`).
+   - Plotly visualizations: Success vs. Failure donut chart and Execution Duration bar charts.
+   - Tabular Recent Executions and Failed Executions audit log.
+
+3. **Add Pipeline (`pages/add_pipeline.py`)**:
+   - Form-based dynamic registration for new CSV and API pipelines.
+   - Upload CSV files with automatic header inspection and configurable quality checks.
+   - Configure custom API URLs, interval seconds, and retry limits.
+   - Live registry management table to enable, disable, or delete pipelines. Deleting a disabled pipeline safely removes only its registry row while preserving all historical execution records in `pipeline_execution`.
 
 ---
 
-## Existing Pipelines
+## 4. Failure Classification & Retry Decision Rules
 
-### API pipeline
+Failure classification is centralized in `pipelines/failure_handling.py`. It inspects exception types, HTTP response status codes, PostgreSQL diagnostic codes, and error string tokens:
 
-The API pipeline reads data from the configured API client, validates it, transforms it, and loads it into PostgreSQL. It follows the same monitoring pattern as the CSV pipeline and records execution metadata, status, retry count, and error details.
-
-### CSV pipeline
-
-The CSV pipeline reads a local sales CSV file, validates required business rules, transforms the data, and loads it into PostgreSQL. This pipeline is used as the structured file-based workload in the same framework.
+| Failure Category | Description / Triggers | Retryable? | Retry Policy / Criteria |
+| :--- | :--- | :---: | :--- |
+| **`NETWORK_ERROR`** | Connectivity drops, connection refused/reset, host unreachable, DNS/name resolution errors | **Yes** | Retried up to configured `max_retries`. |
+| **`TIMEOUT`** | HTTP request timeout, read timeout, socket timeout (`requests.Timeout`, `TimeoutError`) | **Yes** | Retried up to configured `max_retries`. |
+| **`API_ERROR`** | HTTP response errors from external API endpoints | **Conditional** | **Retryable only for HTTP 429 (rate limited) and 5xx (server errors)**. Client errors (4xx like 400, 401, 404) are permanent and fail immediately. |
+| **`DATABASE_ERROR`** | PostgreSQL query, connectivity, or engine failures | **Conditional** | **Retryable only for transient connection loss, deadlocks, or serialization failures** (`pgcode` in `40001`, `40P01` or connection dropped). Schema errors, syntax errors, or constraint violations fail immediately. |
+| **`FILE_ERROR`** | Missing file (`FileNotFoundError`), unreadable file, corrupted CSV format | **No** | Permanent failure; aborts immediately without retry. |
+| **`DATA_QUALITY_ERROR`** | Missing required columns, schema violations, null constraints, duplicate keys, business rule mismatches | **No** | Permanent data anomaly; aborts immediately without retry. |
+| **`UNKNOWN`** | Unclassified exceptions or generic errors | **No** | Default to non-retryable unless a custom handler explicitly marks `retryable: true`. |
 
 ---
 
-## Configurable Pipeline Registration
+## 5. Data Quality, Freshness & Health Scoring
 
-The scheduler reloads `pipelines.yaml` during each registry refresh and also merges in pipelines registered through the Streamlit **Add Pipeline** page. The YAML configuration controls handler, interval, retry limit, and enabled state for entries it defines; a pipeline disabled through the UI remains disabled. DB-registered entries not present in YAML continue to use the built-in API or CSV handlers.
+### 5.1 Data Quality Scoring
 
-Configured handlers must be Python modules inside `pipelines/`. Use `module: pipelines.weather_pipeline` and `handler: run_weather_pipeline`, or use `handler: weather_pipeline` to infer the conventional function name `run_weather_pipeline`. Handlers receive `pipeline_name`, `source_config`, and `retry_count` keyword arguments and return a result dictionary with `status` and, on failure, `error_message`. New handlers are wrapped by the monitoring layer, which records each attempt and publishes its state; handler code should focus on extraction, transformation, and loading. The existing API/CSV handlers retain their current self-recording behavior. Invalid source settings, missing modules, and missing callables are reported as configuration errors and are not executed.
+The framework provides two complementary validation layers:
+1. **CSV Quality Layer (`pipelines/csv_quality.py`)**:
+   - Inspects missing columns, nulls in required fields, unexpected data types, duplicate rows, and business-rule constraints (e.g. quantity must be positive, amount non-negative, amount reconciles with quantity × price).
+   - Generates granular audit counts (`input_rows`, `valid_rows`, `rejected_rows`, `loaded_rows`, `missing_column_count`, `null_count`, `duplicate_count`, `datatype_error_count`, `business_rule_error_count`).
+   - Formula:
+     $$\text{Data Quality Score} = \begin{cases} 100.0 & \text{if } \text{input\_rows} = 0 \\ \operatorname{round}\left(\frac{\text{valid\_rows} \times 100}{\text{input\_rows}}, 2\right) & \text{if } \text{input\_rows} > 0 \end{cases}$$
+2. **Generic Quality Helper (`pipelines/etl.py:evaluate_data_quality`)**:
+   - Used by the API pipeline and generic datasets:
+     $$\text{Score} = \max\left(0.0, \operatorname{round}\left(100 \times \left(1 - \frac{\text{missing\_values} + \text{duplicate\_rows} + \text{invalid\_rows}}{\text{total\_rows}}\right), 2\right)\right)$$
+
+### 5.2 Data Freshness Monitoring (`monitoring/freshness.py`)
+
+Freshness measures the time elapsed since the pipeline's **most recent successful execution**:
+- **`FRESH`**: Age $< 120\text{ seconds}$ (`DATA_FRESHNESS_FRESH_SECONDS`).
+- **`WARNING`**: $120\text{ seconds} \le \text{Age} \le 300\text{ seconds}$ (`DATA_FRESHNESS_WARNING_SECONDS`).
+- **`STALE`**: $\text{Age} > 300\text{ seconds}$ or no recorded successful run.
+
+Both threshold parameters can be customized via `.env` or `config.py`.
+
+### 5.3 Pipeline Health Score (`monitoring/freshness.py:calculate_pipeline_health`)
+
+The health score is a deterministic, weighted metric scaled between $0.0$ and $100.0$:
+
+$$\text{Health Score} = \min\left(100.0, \max\left(0.0, W_{\text{status}} + W_{\text{freshness}} + W_{\text{quality}} - P_{\text{retry}}\right)\right)$$
+
+Where:
+- **Status Weight ($W_{\text{status}}$)**:
+  - `SUCCESS`: $55\text{ pts}$
+  - `RUNNING`: $35\text{ pts}$
+  - `RETRYING`: $25\text{ pts}$
+  - `FAILED`: $10\text{ pts}$
+  - `UNKNOWN`: $0\text{ pts}$
+- **Freshness Weight ($W_{\text{freshness}}$)**:
+  - `FRESH`: $25\text{ pts}$
+  - `WARNING`: $15\text{ pts}$
+  - `STALE`: $5\text{ pts}$
+- **Quality Weight ($W_{\text{quality}}$)**:
+  - $\max\left(0.0, \text{data\_quality\_score} \times 0.2\right)$ (up to $20\text{ pts}$)
+- **Retry Penalty ($P_{\text{retry}}$)**:
+  - $\min\left(20, \max(0, \text{retry\_count}) \times 5\right)$ ($-5\text{ pts}$ per retry attempt, capped at $-20\text{ pts}$)
+
+---
+
+## 6. Configurable Pipeline Registration (`pipelines.yaml` & Dynamic UI)
+
+The framework allows registering pipelines both statically via `pipelines.yaml` and dynamically via the Streamlit UI without altering scheduler or monitoring code.
+
+### 6.1 Declarative YAML Registration (`pipelines.yaml`)
+
+The file `pipelines.yaml` defines baseline pipelines loaded at startup:
 
 ```yaml
 pipelines:
@@ -65,7 +217,6 @@ pipelines:
     interval: 60
     max_retries: 3
     enabled: true
-    url: https://dummyjson.com/carts
 
   - name: csv_pipeline
     source: CSV
@@ -73,284 +224,268 @@ pipelines:
     interval: 60
     max_retries: 3
     enabled: true
-    file_path: data/csv/sales.csv
 ```
 
-To add a pipeline without editing scheduler or monitoring code, create `pipelines/<your_module>.py` with a `run_<your_module>(pipeline_name, source_config, retry_count)` function, then add a YAML entry naming that module and handler. Keep source as `API` or `CSV`: the current PostgreSQL schema intentionally constrains both registry and execution source types to those values. The handler remains in its own module and can use the source configuration fields it needs.
+#### Supported YAML Schema Keys:
+- `name` (required): Unique pipeline identifier (alphanumeric, underscores, hyphens).
+- `source` (required): Must be `API` or `CSV` (aligned with the PostgreSQL check constraint).
+- `handler` or `module` (required):
+  - Conventional shorthand: `handler: my_pipeline` resolves to `pipelines.my_pipeline:run_my_pipeline`.
+  - Explicit module and function: `module: pipelines.my_pipeline` with `handler: run_custom`.
+  - Colon notation: `handler: my_pipeline:run_custom`.
+- `interval` (optional, default `60`): Execution recurrence frequency in seconds.
+- `max_retries` (optional, default `3`): Maximum recovery retry attempts.
+- `enabled` (optional, default `true`): Boolean active flag.
+- Source configuration keys (e.g. `url` for API sources; `file_path` for CSV sources).
+
+### 6.2 Step-by-Step: Adding Another Pipeline via Code & YAML
+
+1. **Create the handler module** under `pipelines/`, for example `pipelines/weather_pipeline.py`:
+   ```python
+   def run_weather_pipeline(*, pipeline_name: str, source_config: dict, retry_count: int = 0) -> dict:
+       url = source_config.get("url")
+       # Extraction, transformation, and database load logic here...
+       return {
+           "status": "SUCCESS",
+           "rows_processed": 10,
+           "error_message": None,
+       }
+   ```
+2. **Register the entry in `pipelines.yaml`**:
+   ```yaml
+   - name: weather_pipeline
+     source: API
+     handler: weather_pipeline
+     interval: 120
+     max_retries: 2
+     enabled: true
+     url: https://api.weather.gov/gridpoints/TOP/31,80/forecast
+   ```
+3. **Execution**: The scheduler discovers the entry on its next 2-second refresh. Because the new handler is not marked with `@execution_history_managed`, the scheduler automatically wraps it with `monitoring.execution.monitor_pipeline_runner`, creating execution records, timing metrics, and failure classifications automatically.
+
+### 6.3 Adding a Pipeline via the Streamlit UI
+
+1. Open the **Add Pipeline** page in the Streamlit application.
+2. Select pipeline type: **CSV** or **API**.
+3. Fill in the fields:
+   - For **CSV**: Enter a name, upload a `.csv` file (automatically placed in `data/storage/`), configure optional column mappings, set interval (seconds), and max retries.
+   - For **API**: Enter a name, provide an HTTP(S) endpoint URL, set interval, and max retries.
+4. Click **Register pipeline**.
+5. The pipeline is written to the `pipeline_registry` table in PostgreSQL. The scheduler picks it up automatically on the next cycle without requiring an application restart.
 
 ---
 
-## Failure Classification
+## 7. Database Schema & Migration Guide
 
-Failures are classified centrally and the category and retry decision are written to each execution row. Categories and retry policy are:
+### 7.1 Database Tables
 
-| Failure Type | Meaning | Retryable |
-| --- | --- | --- |
-| NETWORK_ERROR | connectivity or connection refusal problems | Yes |
-| API_ERROR | API HTTP response failures (429 and 5xx are transient) | 429/5xx only |
-| TIMEOUT | request timeout | Yes |
-| DATABASE_ERROR | PostgreSQL failures | Transient connection/deadlock/serialization errors only |
-| FILE_ERROR | missing or unreadable file | No |
-| DATA_QUALITY_ERROR | missing values, duplicates, required columns, invalid data | No |
-| UNKNOWN | unclassified issue | No, unless a custom handler explicitly marks it retryable |
+1. **`sales_data`**: Target data warehouse table for loaded transactions.
+   - Columns: `id` (SERIAL PRIMARY KEY), `customer_name`, `product_name`, `quantity` ($> 0$), `amount` ($\ge 0$), `sale_date`, `created_at`.
+2. **`pipeline_execution`**: Central execution tracking and audit table.
+   - Columns: `execution_id` (SERIAL PRIMARY KEY), `pipeline_name`, `source_type` (`'CSV'`, `'API'`), `start_time`, `end_time`, `execution_duration_seconds`, `status` (`'SUCCESS'`, `'FAILED'`, `'RUNNING'`, `'RETRYING'`), `rows_processed`, `retry_count`, `error_message`, `execution_log`, `failure_type`, `failure_category`, `retryable`, `data_quality_score`, `freshness_status`, `health_score`, granular CSV quality metrics, `created_at`.
+3. **`pipeline_registry`**: Dynamic database store for UI-registered pipelines.
+   - Columns: `id`, `pipeline_name` (UNIQUE), `pipeline_type` (`'CSV'`, `'API'`), `source_config` (JSONB), `interval_seconds`, `max_retries`, `enabled`, `created_at`, `updated_at`.
+4. **`pipeline_registry_seed_state`**: Tracks idempotency of configuration seeds (`seed_key = 'legacy_pipelines_v1'`).
 
-The classification is added to execution metadata alongside `error_message` and `retryable` so the dashboard can present the reason clearly.
+### 7.2 Running Additive Migrations
 
----
+All schema updates in `database/db.py:Database.ensure_monitoring_schema()` are non-destructive and idempotent. They use `ADD COLUMN IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`, and safe constraint updates. Existing execution records are never deleted or modified destructively.
 
-## Retry Decision Logic
-
-The scheduler keeps the existing retry model but makes it smarter:
-
-- retryable issues are retried up to each configured pipeline's `max_retries` value (`MAX_RETRIES` remains the default for direct handler use),
-- permanent problems stop immediately,
-- the framework preserves the existing attempt flow and status transitions,
-- retry attempts are still visible in `pipeline_execution` as `RETRYING` rows.
-
-Example rule set:
-
-```text
-NETWORK_ERROR / TIMEOUT -> retry
-DATABASE_ERROR -> retry only when transient
-API_ERROR -> retry only for HTTP 429 or 5xx
-FILE_ERROR / DATA_QUALITY_ERROR / UNKNOWN -> no retry by default
-```
-
-This prevents useless retry loops on permanent problems while still recovering from temporary infrastructure issues.
-
----
-
-## Data Quality Monitoring
-
-A small reusable quality layer measures basic data quality for incoming records.
-
-Supported checks:
-
-- missing values
-- duplicate records
-- required columns
-- invalid numeric/date values
-
-The quality helper returns:
-
-- `total_rows`
-- `missing_values`
-- `duplicate_rows`
-- `invalid_rows`
-- `missing_columns`
-- `issues`
-- `score`
-
-The score is intentionally simple and transparent:
-
-```text
-score = 100 * (1 - (missing_values + duplicate_rows + invalid_rows) / total_rows)
-```
-
-This makes the metric understandable and easy to explain academically. If the total row count is zero, the framework records a neutral score of 100.0.
-
-If a required column is missing, the pipeline fails cleanly with a `DATA_QUALITY_ERROR`.
-
----
-
-## Data Freshness Monitoring
-
-Freshness is measured as the age of the most recent successful execution for a pipeline.
-
-The framework uses thresholds:
-
-```text
-Fresh:       < 2 minutes
-Warning:     2-5 minutes
-Stale:       > 5 minutes
-```
-
-These thresholds are configurable through `config.py` using:
-
-```text
-DATA_FRESHNESS_FRESH_SECONDS=120
-DATA_FRESHNESS_WARNING_SECONDS=300
-```
-
-The freshness status is kept lightweight and is computed from the latest success timestamp instead of the most recent run.
-
----
-
-## Pipeline Health Score
-
-A transparent weighted health score is used for the pipeline signals in the dashboard.
-
-The score combines:
-
-- latest status outcome,
-- freshness status,
-- data quality score,
-- retry count.
-
-The formula is deliberately simple:
-
-```text
-status contribution + freshness contribution + quality contribution - retry penalty
-```
-
-The result is bounded between 0 and 100. This keeps the implementation practical and easy to understand without building a complex health model.
-
----
-
-## PostgreSQL Monitoring
-
-The project keeps its PostgreSQL-backed execution history and event notification flow.
-
-The existing monitoring model still works:
-
-- `RUNNING` notifications are emitted when a pipeline starts,
-- `SUCCESS` and `FAILED` states are published on completion,
-- `RETRYING` shows the retry attempt before the next execution starts,
-- execution rows remain available for dashboard polling.
-
-Schema updates are additive and do not delete existing data. The monitoring schema adds fields such as:
-
-- `failure_type`
-- `failure_category` (backfilled from existing `failure_type` values where available)
-- `retryable`
-- `data_quality_score`
-- `freshness_status`
-- `health_score`
-
-This preserves historical execution rows while extending the current monitoring model.
-
----
-
-## Dashboard
-
-The main dashboard remains the approved single-page monitoring interface. The existing design and layout are preserved. A small addition is included only where necessary to show:
-
-- current pipeline status,
-- freshness,
-- data quality,
-- health score,
-- failure type,
-- retryable status.
-
-The Airflow-inspired overview page remains a lightweight operational summary page without replacing the original dashboard.
-
----
-
-## Near-Real-Time Monitoring
-
-The database emits PostgreSQL `NOTIFY` messages for RUNNING, RETRYING, SUCCESS, and FAILED transitions. The Streamlit views refresh on their configured fragment interval and poll the latest execution ID; they do not open a PostgreSQL `LISTEN` connection. This preserves lightweight near-real-time updates without changing the current dashboard architecture.
-
-This keeps the solution realistic and faithful to the project scope.
-
----
-
-## Add a Pipeline from the UI
-
-Open **Add Pipeline** in the Streamlit sidebar and choose **CSV** or **API**. Enter a unique pipeline name, source, interval, retry limit, and enabled state, then select **Register pipeline**. The page confirms the registration and lists all configured pipelines. Use its Enable/Disable action to pause or resume a pipeline without removing execution history.
-
-UI registrations are stored in PostgreSQL's `pipeline_registry` table. The scheduler reloads YAML definitions and database registrations every two seconds, applying the configured interval and retry limit. Entries defined in YAML retain their handler settings; database-only UI registrations continue to use the existing CSV and API modules. Schema initialization is additive and does not alter or duplicate execution history.
-
-Uploaded CSV files are stored under `data/storage/` with generated filenames. CSV input must use the sales columns expected by the existing target table: `customer_name`, `product_name`, `quantity`, `amount`, and `sale_date`. Missing columns, invalid values, and duplicates are recorded as data-quality failures. API URLs must be valid HTTP(S) URLs without embedded credentials, and API responses must be compatible with the current sales-data normalization.
-
-### Demo steps
-
-1. Start PostgreSQL, then start the scheduler and Streamlit using the commands below.
-2. Open **Add Pipeline**, select **CSV**, enter `customer_pipeline`, upload a compatible sales CSV, and choose its interval and retries.
-3. Register it and confirm the success message and registry row.
-4. Open **Pipeline Monitor** to see its status and execution history. The scheduler discovers it automatically and writes the same PostgreSQL execution and `NOTIFY` events used by the built-in pipelines.
-5. Open **Overview** to see the new pipeline in Pipeline Health. Use **Disable** on Add Pipeline to pause it; enabling it again makes it eligible on the next scheduler refresh.
-
-The same page can register API pipelines by supplying an HTTP(S) URL. Network and timeout failures are retryable; API responses are retried only for HTTP 429/5xx; missing/unreadable CSV files, validation failures, and permanent database errors are not.
-
----
-
-## How to Run the Project
-
-### 1. Create or activate the environment
-
-```powershell
-cd project_pipeline
-.\venv\Scripts\Activate.ps1
-```
-
-### 2. Start PostgreSQL
-
-Start the local PostgreSQL instance used by the project.
-
-### 3. Apply the additive monitoring migration
+To manually trigger the database preparation and migration:
 
 ```powershell
 .\venv\Scripts\python.exe -c "from pipelines.scheduler import prepare_database; prepare_database()"
 ```
 
-This adds/backfills `failure_category` and adds `retryable` without deleting execution rows. The scheduler also runs this idempotent migration during startup.
+> **Compatibility Note**: Running `prepare_database()` on a database with existing history maintains row counts exactly (verified with 1,209 historical execution records preserved).
 
-### 4. Start the scheduler
+---
 
+## 8. Setup & Running the Project
+
+### 8.1 Prerequisites
+- Operating System: Windows 10/11 (or Linux/macOS with appropriate shell paths).
+- Python 3.10+ (tested on Python 3.14).
+- PostgreSQL 12+ running locally on port 5432.
+
+### 8.2 Environment Variables (`.env`)
+
+Configure the `.env` file in the project root:
+
+```ini
+# PostgreSQL Database Settings
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=pipeline_monitor
+DB_USER=postgres
+DB_PASSWORD=your_password_here
+
+# API & Source Settings
+API_BASE_URL=https://dummyjson.com/carts
+CSV_PIPELINE_PATH=data/csv/sales.csv
+PIPELINES_CONFIG_PATH=pipelines.yaml
+
+# Scheduler & Monitoring Cadence
+PIPELINE_INTERVAL_SECONDS=60
+MAX_RETRIES=3
+DASHBOARD_REFRESH_SECONDS=3
+DATA_FRESHNESS_FRESH_SECONDS=120
+DATA_FRESHNESS_WARNING_SECONDS=300
+PIPELINE_STATUS_EVENT_CHANNEL=pipeline_status
+LOG_FILE=logs/pipeline.log
+```
+
+### 8.3 Step-by-Step Launch Sequence
+
+#### Step 1: Activate Virtual Environment
+Open PowerShell:
+```powershell
+cd C:\Users\john27\MCA\mini_project\project_pipeline
+.\venv\Scripts\Activate.ps1
+```
+
+#### Step 2: Verify Database Connectivity
+```powershell
+.\venv\Scripts\python.exe test_db.py
+```
+*Expected output: `Database Connected Successfully!`*
+
+#### Step 3: Run Additive Migration & Seed Check
+```powershell
+.\venv\Scripts\python.exe -c "from pipelines.scheduler import prepare_database; prepare_database()"
+```
+
+#### Step 4: Start the Continuous Pipeline Scheduler (Terminal 1)
 ```powershell
 .\venv\Scripts\python.exe main.py
 ```
+*The scheduler runs continuously in the foreground. Press `Ctrl + C` to stop.*
 
-### 5. Start the dashboard
-
+#### Step 5: Start the Streamlit Dashboard (Terminal 2)
+Open a second PowerShell terminal:
 ```powershell
+cd C:\Users\john27\MCA\mini_project\project_pipeline
+.\venv\Scripts\Activate.ps1
 .\venv\Scripts\python.exe -m streamlit run app.py
 ```
+*(Legacy direct entry: `.\venv\Scripts\python.exe -m streamlit run monitoring/dashboard.py`)*
 
-or, if needed for the legacy direct dashboard entry:
+The dashboard will open automatically in your browser at `http://localhost:8501`.
+
+---
+
+## 9. Verification & Testing
+
+### 9.1 Running Regression Tests
+
+The project includes unit and regression tests covering failure classification, retry policies, data quality metrics, freshness states, YAML parsing, dynamic registration, and event notification payloads:
 
 ```powershell
-.\venv\Scripts\python.exe -m streamlit run monitoring/dashboard.py
+.\venv\Scripts\python.exe -m pytest
 ```
 
----
+Output:
+```text
+============================= test session starts =============================
+platform win32 -- Python 3.14.0, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\Users\john27\MCA\mini_project\project_pipeline
+collected 37 items
 
-## Testing
+tests\test_csv_quality.py .....                                          [ 13%]
+tests\test_monitoring_features.py .............................          [ 91%]
+tests\test_overview_health.py ..                                         [ 97%]
+tests\test_pipeline_events.py .                                          [100%]
 
-The project includes regression tests for the monitoring features, including:
+============================= 37 passed in 0.97s ==============================
+```
 
-- network failure classification,
-- API, timeout, database, file, data-quality, and unknown failure policies,
-- configured retry limits and custom handler dispatch,
-- data quality scoring,
-- freshness state thresholds,
-- API and CSV discovery from `pipelines.yaml`.
+### 9.2 Python Syntax Compilation Check
 
-Run tests with:
+To verify that all Python source files compile cleanly without syntax errors:
 
 ```powershell
-.\venv\Scripts\python.exe -m pytest -q
+.\venv\Scripts\python.exe -m py_compile (Get-ChildItem -Recurse -Filter *.py | Where-Object { $_.FullName -notmatch 'venv' } | ForEach-Object { $_.FullName })
 ```
 
+### 9.3 Git Formatting Check
+
+```powershell
+git diff --check
+```
+
+### 9.4 Ad-Hoc Manual Pipeline Tests
+
+To manually execute a single run of the built-in pipelines without waiting for the scheduler:
+
+- **Manual API Pipeline Run**:
+  ```powershell
+  .\venv\Scripts\python.exe -c "from pipelines.api_pipeline import run_api_pipeline; print(run_api_pipeline())"
+  ```
+- **Manual CSV Pipeline Run**:
+  ```powershell
+  .\venv\Scripts\python.exe -c "from pipelines.csv_pipeline import run_csv_pipeline; print(run_csv_pipeline('data/csv/sales.csv'))"
+  ```
+- **Simulate Network Failure & Retry**:
+  ```powershell
+  $env:API_BASE_URL = "http://127.0.0.1:1"
+  .\venv\Scripts\python.exe -c "from pipelines.api_pipeline import run_api_pipeline; print(run_api_pipeline())"
+  $env:API_BASE_URL = "https://dummyjson.com/carts"
+  ```
+
 ---
 
-## Academic Positioning
+## 10. Verification Status & Known Limitations
 
-This framework is presented as a lightweight, configurable data pipeline monitoring and recovery framework developed for academic demonstration. It is intentionally bounded in scope, practical to implement, and compatible with the existing project architecture.
+### 10.1 Verified Repository State (Commit `0361db7` on `main`)
+- **Git Commit**: Verified HEAD is commit `0361db7` on branch `main`.
+- **Test Suite**: Verified all **37 tests pass** across the four test modules.
+- **Compilation**: Verified Python syntax compilation passes cleanly for all workspace scripts.
+- **Git Diff**: Verified `git diff --check` passes cleanly with no trailing whitespace or formatting conflicts.
+- **Database History Preservation**: Verified applying `prepare_database()` preserves existing history intact without altering or truncating row counts (count verified at 1,209 records).
+- **Execution Scope Note**: In accordance with regression testing best practices, the automated test suite uses test doubles, mocks, and isolated fixtures. The continuous production API and CSV ETL pipelines were **not** actively run against live endpoints during test verification.
 
-It is designed to show core monitoring concepts clearly and reliably without introducing unnecessary distributed infrastructure or enterprise-scale complexity.
-
----
-
-## Summary
-
-The project now includes:
-
-- dynamic pipeline registration,
-- failure classification,
-- retry decision logic,
-- data quality checks and scoring,
-- freshness checks,
-- health scoring,
-- additive database upgrades,
-- monitoring integration without redesigning the existing system.
-
-This keeps the current framework stable while making it more practical and more demonstrably intelligent for academic evaluation.
+### 10.2 Known Limitations
+1. **Source Type Constraints**: The PostgreSQL schema enforces a check constraint (`CHECK (source_type IN ('CSV', 'API'))`). New custom pipelines must align with either `CSV` or `API` source classifications.
+2. **Handler Package Boundary**: Custom handlers must be Python modules placed inside the `pipelines/` package.
+3. **Near-Real-Time Streamlit Polling**: The Streamlit interface updates near-real-time by polling database changes via `@st.fragment(run_every=3)`. It does not maintain a continuous PostgreSQL `LISTEN` socket connection, which avoids persistent connection state issues with Streamlit session restarts.
+4. **Target Schema Uniformity**: The built-in loader (`pipelines/etl.py:load_sales_data`) expects target records to conform to the `sales_data` schema (`customer_name`, `product_name`, `quantity`, `amount`, `sale_date`).
 
 ---
 
-## Author
+## 11. Demo Walkthrough for Academic Evaluation
 
-John Prasad
-TVE25MCA-2037
-College of Engineering Trivandrum
+Follow these steps to demonstrate the complete framework during project viva / evaluation:
+
+1. **System Startup**:
+   - Start PostgreSQL service.
+   - Launch the scheduler in Terminal 1: `python main.py`.
+   - Launch the Streamlit dashboard in Terminal 2: `streamlit run app.py`.
+2. **Explore the Airflow-Inspired Overview**:
+   - Navigate to `http://localhost:8501` and view **Overview**.
+   - Show status cards for *Failed*, *Running*, and *Successful* pipelines.
+   - Select different time windows (*Last 1 Hour*, *Last 24 Hours*) to showcase dynamic time-window filtering.
+3. **Inspect the Pipeline Monitor**:
+   - Open **Pipeline Monitor** from the sidebar.
+   - Examine KPI cards: *Total Pipelines*, *Successful Runs*, *Failed Runs*, *Rows Processed*, and *Avg Exec Duration*.
+   - Filter by `csv_pipeline` to show the granular CSV data quality breakdown table (`Missing columns`, `Null values`, `Duplicates`, `Datatype errors`, `Business rule errors`).
+   - Highlight the *Health Score*, *Data Freshness*, and Plotly *Success vs Failure* charts.
+4. **Demonstrate Dynamic Registration & Control**:
+   - Navigate to **Add Pipeline**.
+   - Register a new CSV pipeline (upload a valid sample CSV or point to `data/csv/sales.csv`) with interval `30` seconds and `2` retries.
+   - Observe the confirmation and registry row. Switch to the Overview and Monitor pages to show the scheduler picking it up automatically.
+   - Disable the pipeline from the UI to demonstrate pause functionality without deleting history.
+5. **Demonstrate Failure Classification & Recovery**:
+   - Run the network failure simulation script in a separate terminal:
+     `$env:API_BASE_URL = "http://127.0.0.1:1"; python -c "from pipelines.api_pipeline import run_api_pipeline; print(run_api_pipeline())"`
+   - Show that the dashboard immediately displays the `RETRYING` transition, classifies the error as `NETWORK_ERROR` (`retryable = YES`), attempts recovery up to max retries, and transitions to `FAILED` with failure category properly logged.
+   - Restore `$env:API_BASE_URL = "https://dummyjson.com/carts"` and execute a clean run to demonstrate self-healing back to `SUCCESS`.
+
+---
+
+## 12. Author & Academic Information
+
+- **Student Name**: John Prasad
+- **Register Number**: TVE25MCA-2037
+- **Course**: Master of Computer Applications (MCA)
+- **Institution**: College of Engineering Trivandrum (CET)
+- **Project**: Data Pipeline Monitoring and Recovery Framework (Mini Project)

@@ -24,6 +24,7 @@ except Exception:
 pages = [
     st.Page("pages/overview.py", title="Overview", icon="🏠"),
     st.Page("monitoring/dashboard.py", title="Pipeline Monitor", icon="📊"),
+    st.Page("pages/execution_history.py", title="Execution History", icon="⏱️"),
     st.Page("pages/add_pipeline.py", title="Add Pipeline", icon=":material/add_circle:"),
 ]
 

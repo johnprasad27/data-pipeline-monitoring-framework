@@ -144,7 +144,36 @@ class APIClient:
                             "sale_date": date.today().isoformat(),
                         })
 
-            # Case 2: Payload is already a list of sales-like records (mock file)
+            # Case 2: DummyJSON /products or dict wrapping 'products', 'items', 'data', or 'results'
+            elif isinstance(payload, dict) and any(
+                k in payload and isinstance(payload[k], list)
+                for k in ("products", "items", "data", "results")
+            ):
+                list_key = next(
+                    k for k in ("products", "items", "data", "results")
+                    if k in payload and isinstance(payload[k], list)
+                )
+                logger.info("Normalizing payload list under '%s' into sales records", list_key)
+                for index, item in enumerate(payload[list_key], start=1):
+                    if isinstance(item, dict) and all(k in item for k in ("customer_name", "product_name", "quantity", "amount", "sale_date")):
+                        records.append({
+                            "customer_name": item["customer_name"],
+                            "product_name": item["product_name"],
+                            "quantity": item["quantity"],
+                            "amount": item["amount"],
+                            "sale_date": item["sale_date"],
+                        })
+                    elif isinstance(item, dict):
+                        item_id = item.get("id", index)
+                        records.append({
+                            "customer_name": item.get("customer_name") or f"Customer {item_id}",
+                            "product_name": item.get("title") or item.get("product_name") or item.get("product") or item.get("name") or "",
+                            "quantity": max(1, int(item.get("quantity") or item.get("minimumOrderQuantity") or 1)),
+                            "amount": max(0.0, float(item.get("price") if item.get("price") is not None else item.get("amount") or 0.0)),
+                            "sale_date": item.get("sale_date") or date.today().isoformat(),
+                        })
+
+            # Case 3: Payload is already a list of sales-like records (mock file)
             elif isinstance(payload, list):
                 logger.info("Payload is a list; attempting to coerce to sales schema")
                 for item in payload:

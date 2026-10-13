@@ -41,14 +41,24 @@ def _display_timestamp(row: dict) -> str:
     return "-"
 
 
+def _bar(label: str, count: int, percentage: float, color: str, symbol: str) -> str:
+    width = min(max(float(percentage), 0.0), 100.0)
+    return (
+        "<div style='margin-bottom:0.45rem;'>"
+        "<div style='display:flex;justify-content:space-between;align-items:center;"
+        "color:#F8FAFC;margin-bottom:0.18rem;font-size:0.84rem;'>"
+        f"<span>{symbol} {html.escape(label)}</span><span>{count} &nbsp; {percentage:.1f}%</span></div>"
+        "<div style='height:8px;background:#1E293B;border-radius:999px;overflow:hidden;'>"
+        f"<div style='height:100%;width:{width}%;background:{color};border-radius:999px;'></div>"
+        "</div></div>"
+    )
+
+
 with st.sidebar:
     st.markdown("<div style='font-size: 1.1rem; font-weight: 800; color: #F8FAFC; margin-bottom: 0.5rem;'>📊 Data Pipeline Monitor</div>", unsafe_allow_html=True)
     st.markdown("<hr style='border-top: 1px solid #334155; margin: 0.5rem 0 0.75rem 0;' />", unsafe_allow_html=True)
-    st.page_link("pages/overview.py", label="🏠 Overview", icon="🏠")
-    st.page_link("monitoring/dashboard.py", label="📊 Pipeline Monitor", icon="📊")
-    st.page_link("pages/add_pipeline.py", label="Add Pipeline", icon=":material/add_circle:")
-    st.markdown("<hr style='border-top: 1px solid #334155; margin: 0.75rem 0;' />", unsafe_allow_html=True)
     st.markdown("<div><strong>Status</strong>: <span style='color:#22C55E'>●</span> Database Connected</div>", unsafe_allow_html=True)
+    st.markdown("<hr style='border-top: 1px solid #334155; margin: 0.75rem 0;' />", unsafe_allow_html=True)
     st.caption("© Data Pipeline Monitoring")
 
 
@@ -104,8 +114,6 @@ def overview_page() -> None:
         components = [
             ("Database", "Connected" if db.connection and not db.connection.closed else "Unavailable"),
             ("Scheduler", "Running" if summary["running"] > 0 or summary["total_executions"] > 0 else "Idle"),
-            ("API Pipeline", next((item["label"] for item in summary["pipeline_health"] if item["pipeline_name"] == "api_pipeline"), "Unknown")),
-            ("CSV Pipeline", next((item["label"] for item in summary["pipeline_health"] if item["pipeline_name"] == "csv_pipeline"), "Unknown")),
             ("Recovery System", "Active" if summary["retrying"] > 0 or summary["failed"] > 0 else "Idle"),
             ("Monitoring", "Active" if db.connection and not db.connection.closed else "Unavailable"),
         ]
@@ -131,25 +139,41 @@ def overview_page() -> None:
             )
 
         st.markdown("<div style='font-size:1.08rem; font-weight:700; margin-top: 1.2rem; margin-bottom: 0.65rem;'>Pipeline Runs</div>", unsafe_allow_html=True)
-        distribution = [
-            ("Success", summary["successful"], summary["distribution"]["success_pct"]),
-            ("Failed", summary["failed"], summary["distribution"]["failed_pct"]),
-            ("Retrying", summary["retrying"], summary["distribution"]["retrying_pct"]),
-        ]
-        for label, count, pct in distribution:
-            if label == "Success":
-                symbol = "✓"
-                color = "#22C55E"
-            elif label == "Failed":
-                symbol = "✕"
-                color = "#EF4444"
-            else:
-                symbol = "↻"
-                color = "#F59E0B"
+        for pipeline in summary["pipeline_run_counts"]:
             st.markdown(
-                f"<div style='margin-bottom:0.5rem;'><div style='display:flex; justify-content:space-between; align-items:center; color:#F8FAFC; margin-bottom:0.2rem; font-size:0.92rem;'><span>{symbol} {label}</span><span>{count} &nbsp; {pct:.1f}%</span></div><div style='height:9px; background:#1E293B; border-radius:999px; overflow:hidden;'><div style='height:100%; width:{min(max(pct, 0.0), 100.0)}%; background:{color}; border-radius:999px;'></div></div></div>",
+                f"<div style='border:1px solid #1F2937;background:#0F172A;border-radius:10px;"
+                "padding:0.75rem 0.85rem;margin-bottom:0.65rem;'>"
+                f"<div style='font-weight:700;color:#F8FAFC;margin-bottom:0.55rem;'>{html.escape(pipeline['pipeline_name'])}"
+                f"<span style='float:right;color:#94A3B8;font-size:0.8rem;'>{pipeline['total']} total</span></div>"
+                + _bar("Queued", pipeline["queued"], pipeline["queued_pct"], "#64748B", "·")
+                + _bar("Running", pipeline["running"], pipeline["running_pct"], "#06B6D4", "↻")
+                + _bar("Success", pipeline["success"], pipeline["success_pct"], "#22C55E", "✓")
+                + _bar("Failed", pipeline["failed"], pipeline["failed_pct"], "#EF4444", "✕")
+                + "</div>",
                 unsafe_allow_html=True,
             )
+
+        task_summary = summary["task_summary"]
+        st.markdown(
+            f"<div style='font-size:1.08rem;font-weight:700;margin-top:1.2rem;margin-bottom:0.65rem;'>"
+            f"Task Instances <span style='color:#94A3B8;font-size:0.8rem;font-weight:400;'>({task_summary['total']} recorded)</span></div>",
+            unsafe_allow_html=True,
+        )
+        if task_summary["total"] == 0:
+            st.caption("No task-stage history is recorded for this time range.")
+        else:
+            for pipeline_name, tasks in task_summary["by_pipeline"].items():
+                st.markdown(f"<div style='color:#CBD5E1;font-weight:700;margin:0.45rem 0 0.25rem;'>{html.escape(pipeline_name)}</div>", unsafe_allow_html=True)
+                for task_name, counts in tasks.items():
+                    st.markdown(
+                        f"<div style='display:flex;justify-content:space-between;border-bottom:1px solid #1F2937;"
+                        f"padding:0.35rem 0;color:#CBD5E1;font-size:0.84rem;'>"
+                        f"<span>{html.escape(task_name)}</span><span>"
+                        f"<span style='color:#22C55E;'>✓ {counts['SUCCESS']}</span> "
+                        f"<span style='color:#EF4444;'>✕ {counts['FAILED']}</span> "
+                        f"<span style='color:#F59E0B;'>↷ {counts['SKIPPED']}</span></span></div>",
+                        unsafe_allow_html=True,
+                    )
 
     with right:
         st.markdown("<div style='font-size:1.08rem; font-weight:700; margin-top: 1.5rem; margin-bottom: 0.65rem;'>Recent Activity</div>", unsafe_allow_html=True)
@@ -157,11 +181,36 @@ def overview_page() -> None:
             status = str(row.get("status") or "UNKNOWN").upper()
             text = row.get("error_message") or f"{row.get('rows_processed') or 0} rows processed"
             failure_category = row.get("failure_category") or row.get("failure_type")
-            category_label = (
-                f"<div style='color:#F59E0B; margin-top:0.3rem; font-size:0.8rem;'>Failure category: {html.escape(str(failure_category))}</div>"
-                if failure_category
-                else ""
-            )
+            category_label = ""
+            if status == "FAILED":
+                cat = str(failure_category).strip() if failure_category else "UNKNOWN"
+                if cat in {"-", "—", "None", "NULL", ""}:
+                    cat = "UNKNOWN"
+                category_label = (
+                    f"<div style='color:#EF4444; margin-top:0.3rem; font-size:0.8rem;'>"
+                    f"Failure category: {html.escape(cat)}</div>"
+                )
+                text = row.get("error_message") or "Execution failed"
+            elif status == "SUCCESS" and row.get("retry_count", 0) > 0 and failure_category and str(failure_category).upper() not in {"UNKNOWN", "UNKNOWN_ERROR", "-", "—"}:
+                lbl = str(failure_category) if str(failure_category).startswith("Recovered (") else f"Recovered ({failure_category})"
+                category_label = (
+                    f"<div style='color:#F59E0B; margin-top:0.3rem; font-size:0.8rem;'>"
+                    f"{html.escape(lbl)}</div>"
+                )
+                text = f"{row.get('rows_processed') or 0} rows processed"
+            elif status == "SUCCESS":
+                category_label = ""
+                text = f"{row.get('rows_processed') or 0} rows processed"
+            elif status == "RETRYING" and failure_category:
+                category_label = (
+                    f"<div style='color:#F59E0B; margin-top:0.3rem; font-size:0.8rem;'>"
+                    f"Retrying: {html.escape(str(failure_category))}</div>"
+                )
+                text = row.get("error_message") or "Retrying..."
+            else:
+                category_label = ""
+                text = row.get("error_message") or f"{row.get('rows_processed') or 0} rows processed"
+
             st.markdown(
                 f"<div style='background:#0F172A; border:1px solid #1F2937; border-radius:10px; padding:0.7rem 0.8rem; margin-bottom:0.5rem;'><div style='color:#94A3B8; font-size:0.76rem;'>{_display_timestamp(row)}</div><div style='font-weight:700; margin-top:0.2rem; color:#F8FAFC;'>{row.get('pipeline_name') or 'Unknown'}</div><div style='margin-top:0.2rem;'>{_status_tag(status)}</div>{category_label}<div style='color:#CBD5E1; margin-top:0.4rem; font-size:0.85rem;'>{html.escape(str(text))}</div></div>",
                 unsafe_allow_html=True,

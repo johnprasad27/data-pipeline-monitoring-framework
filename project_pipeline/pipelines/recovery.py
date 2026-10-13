@@ -28,6 +28,7 @@ def run_with_recovery(
         "rows_processed": 0,
         "error_message": "Pipeline did not run",
     }
+    earlier_failure_category: str | None = None
 
     for retry_count in range(retry_limit + 1):
         if retry_count:
@@ -60,6 +61,14 @@ def run_with_recovery(
         if last_result.get("status") == "SUCCESS":
             if retry_count:
                 logger.info("retry completed: %s succeeded on attempt %d", pipeline_name, retry_count)
+                if earlier_failure_category:
+                    recovered_label = f"Recovered ({earlier_failure_category})"
+                    last_result["recovered_failure_category"] = earlier_failure_category
+                    last_result["failure_category"] = recovered_label
+                    last_result["failure_type"] = recovered_label
+                    execution_id = last_result.get("execution_id")
+                    if execution_id is not None:
+                        _record_recovered_category(execution_id, recovered_label)
             return last_result
 
         failure_type, retryable = classify_failure(
@@ -69,6 +78,7 @@ def run_with_recovery(
         last_result["failure_type"] = failure_type
         last_result["failure_category"] = failure_type
         last_result["retryable"] = retryable
+        earlier_failure_category = failure_type
 
         execution_id = last_result.get("execution_id")
         if last_result["retryable"] and retry_count < retry_limit:
@@ -112,5 +122,22 @@ def _mark_retrying(execution_id: Any, result: dict[str, Any]) -> None:
         )
     except Exception:
         logger.exception("database error while marking execution RETRYING")
+    finally:
+        db.close()
+
+
+def _record_recovered_category(execution_id: Any, recovered_label: str) -> None:
+    """Store recovered failure label on a successfully retried execution row."""
+    if execution_id is None:
+        return
+    db = Database()
+    try:
+        db.connect()
+        db.execute(
+            "UPDATE pipeline_execution SET failure_category = %s, failure_type = %s WHERE execution_id = %s",
+            (recovered_label, recovered_label, execution_id),
+        )
+    except Exception:
+        logger.exception("database error while recording recovered category")
     finally:
         db.close()

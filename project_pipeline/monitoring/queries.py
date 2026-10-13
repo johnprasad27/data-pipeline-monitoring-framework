@@ -115,25 +115,35 @@ def latest_execution_event_id(db: Database, pipeline_name: str | None = None) ->
         raise DatabaseError(f"Failed to fetch latest execution event: {e}") from e
 
 
-def execution_history(db: Database, limit: Optional[int] = None, pipeline_name: str | None = None) -> List[Dict[str, Any]]:
+def execution_history(
+    db: Database,
+    limit: Optional[int] = None,
+    pipeline_name: str | None = None,
+    status: str | None = None,
+    since: str | datetime | None = None,
+) -> List[Dict[str, Any]]:
     try:
+        conditions: list[str] = []
+        params: list[Any] = []
+
         if pipeline_name:
-            if limit and isinstance(limit, int):
-                results = db.fetch_all(
-                    "SELECT * FROM pipeline_execution WHERE pipeline_name = %s ORDER BY execution_id DESC LIMIT %s",
-                    (pipeline_name, limit),
-                )
-            else:
-                results = db.fetch_all(
-                    "SELECT * FROM pipeline_execution WHERE pipeline_name = %s ORDER BY execution_id DESC",
-                    (pipeline_name,),
-                )
-        else:
-            if limit and isinstance(limit, int):
-                results = db.fetch_all("SELECT * FROM pipeline_execution ORDER BY execution_id DESC LIMIT %s", (limit,))
-            else:
-                results = db.fetch_all("SELECT * FROM pipeline_execution ORDER BY execution_id DESC")
-        return results
+            conditions.append("pipeline_name = %s")
+            params.append(pipeline_name)
+
+        if status and status.strip().upper() not in {"ALL", "ALL STATUSES"}:
+            conditions.append("UPPER(status) = %s")
+            params.append(status.strip().upper())
+
+        if since:
+            conditions.append("created_at >= %s")
+            params.append(since)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT * FROM pipeline_execution {where_clause} ORDER BY execution_id DESC"
+        if limit and isinstance(limit, int):
+            sql += f" LIMIT {int(limit)}"
+
+        return db.fetch_all(sql, tuple(params) if params else None)
     except Exception as e:
         raise DatabaseError(f"Failed to fetch execution history: {e}") from e
 
@@ -157,10 +167,16 @@ def get_all_pipelines(db: Database) -> List[Dict[str, Any]]:
             WITH latest AS (
                 SELECT DISTINCT ON (pipeline_name)
                     pipeline_name, status, rows_processed,
+                    source_type, retry_count, created_at,
+                    start_time, end_time,
                     COALESCE(execution_duration_seconds,
                         EXTRACT(EPOCH FROM (end_time - start_time))) AS execution_duration_seconds,
-                    retry_count, created_at, source_type, start_time, end_time,
-                    COALESCE(failure_category, failure_type) AS failure_category
+                    CASE
+                        WHEN status = 'SUCCESS' AND retry_count > 0 AND COALESCE(failure_category, failure_type) NOT IN ('UNKNOWN', 'UNKNOWN_ERROR')
+                            THEN COALESCE(failure_category, failure_type)
+                        WHEN status = 'SUCCESS' THEN NULL
+                        ELSE COALESCE(failure_category, failure_type)
+                    END AS failure_category
                 FROM pipeline_execution
                 ORDER BY pipeline_name, execution_id DESC
             )
@@ -265,3 +281,72 @@ def get_pipeline_statistics(db: Database, pipeline_name: str) -> Dict[str, Any]:
         return stats
     except Exception as e:
         raise DatabaseError(f"Failed to fetch pipeline statistics: {e}") from e
+
+
+def get_task_instances(
+    db: Database,
+    pipeline_name: Optional[str] = None,
+    since: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return task-stage counts grouped by pipeline_name + task_name + status.
+
+    Each row contains: pipeline_name, task_name, status, count.
+    Optionally filter by pipeline_name and/or a `since` timestamp string.
+    """
+    try:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if pipeline_name:
+            conditions.append("pipeline_name = %s")
+            params.append(pipeline_name)
+        if since:
+            conditions.append("created_at >= %s::timestamp")
+            params.append(since)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        results = db.fetch_all(
+            f"""
+            SELECT pipeline_name, task_name, status, COUNT(*) AS count
+            FROM pipeline_task_execution
+            {where}
+            GROUP BY pipeline_name, task_name, status
+            ORDER BY pipeline_name, task_name, status
+            """,
+            tuple(params) if params else None,
+        )
+        return results
+    except Exception as e:
+        raise DatabaseError(f"Failed to fetch task instances: {e}") from e
+
+
+def get_pipeline_run_counts(
+    db: Database,
+    since: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return per-pipeline status counts for the overview page.
+
+    Each row contains: pipeline_name, status, count.
+    """
+    try:
+        if since:
+            results = db.fetch_all(
+                """
+                SELECT pipeline_name, status, COUNT(*) AS count
+                FROM pipeline_execution
+                WHERE created_at >= %s::timestamp
+                GROUP BY pipeline_name, status
+                ORDER BY pipeline_name, status
+                """,
+                (since,),
+            )
+        else:
+            results = db.fetch_all(
+                """
+                SELECT pipeline_name, status, COUNT(*) AS count
+                FROM pipeline_execution
+                GROUP BY pipeline_name, status
+                ORDER BY pipeline_name, status
+                """
+            )
+        return results
+    except Exception as e:
+        raise DatabaseError(f"Failed to fetch pipeline run counts: {e}") from e
