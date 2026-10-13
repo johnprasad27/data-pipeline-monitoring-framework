@@ -74,61 +74,112 @@ def read_api_data(api_client) -> pd.DataFrame:
         raise ETLError(f"Failed to read API data: {e}") from e
 
 
-def validate_sales_data(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+def evaluate_data_quality(
+    df: pd.DataFrame | list[dict],
+    required_columns: list[str] | None = None,
+    check_duplicates: bool = True,
+) -> dict:
+    """Return a compact quality summary, including a simple quality score."""
+    frame = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(df)
+    required = required_columns or [
+        "customer_name",
+        "product_name",
+        "quantity",
+        "amount",
+        "sale_date",
+    ]
+    missing_columns = [col for col in required if col not in frame.columns]
+    total_rows = len(frame)
+
+    missing_values = 0
+    if required and not missing_columns:
+        missing_values = int(frame[required].isna().sum().sum())
+
+    duplicate_rows = 0
+    if check_duplicates and total_rows > 0:
+        duplicate_rows = int(frame.duplicated(subset=required if not missing_columns else None).sum())
+
+    invalid_rows = 0
+    issues: list[str] = []
+    if "quantity" in frame.columns:
+        invalid_rows += int((frame["quantity"] <= 0).sum())
+        if (frame["quantity"] <= 0).sum() > 0:
+            issues.append(f"Found {(frame['quantity'] <= 0).sum()} rows with quantity <= 0")
+    if "amount" in frame.columns:
+        invalid_rows += int((frame["amount"] <= 0).sum())
+        if (frame["amount"] <= 0).sum() > 0:
+            issues.append(f"Found {(frame['amount'] <= 0).sum()} rows with amount <= 0")
+    if "sale_date" in frame.columns:
+        invalid_dates = pd.to_datetime(frame["sale_date"], errors="coerce").isna()
+        invalid_rows += int(invalid_dates.sum())
+        if invalid_dates.sum() > 0:
+            issues.append(f"Found {int(invalid_dates.sum())} rows with invalid sale dates")
+
+    if missing_columns:
+        issues.append(f"Missing required columns: {missing_columns}")
+    if duplicate_rows > 0:
+        issues.append(f"Found {duplicate_rows} duplicate rows")
+    if missing_values > 0:
+        issues.append(f"Found {missing_values} missing values")
+
+    if total_rows == 0:
+        score = 100.0
+    else:
+        penalties = missing_values + duplicate_rows + invalid_rows
+        score = max(0.0, round(100 * (1 - (penalties / total_rows)), 2))
+
+    return {
+        "total_rows": total_rows,
+        "missing_values": missing_values,
+        "duplicate_rows": duplicate_rows,
+        "invalid_rows": invalid_rows,
+        "missing_columns": missing_columns,
+        "issues": issues,
+        "score": score,
+        "status": "PASS" if not issues else "FAIL",
+    }
+
+
+def validate_sales_data(
+    df: pd.DataFrame,
+    check_duplicates: bool = True,
+) -> tuple[pd.DataFrame, list[str]]:
     """
     Validate sales_data DataFrame for data quality issues.
-    
+
     Checks:
+        - Required columns exist
         - No null values in required columns
         - Quantity > 0
         - Amount > 0
         - Valid sale_date format
-    
-    Args:
-        df: DataFrame to validate.
-    
-    Returns:
-        tuple: (validated_df, list of error messages)
-               Empty error list means validation passed.
-    
-    Raises:
-        ETLError: If validation cannot be performed.
+        - Duplicate rows are reported for monitoring
     """
-    errors = []
-    
-    # Check required columns exist
-    required_columns = ['customer_name', 'product_name', 'quantity', 'amount', 'sale_date']
+    errors: list[str] = []
+    required_columns = ["customer_name", "product_name", "quantity", "amount", "sale_date"]
     missing_columns = [col for col in required_columns if col not in df.columns]
     if missing_columns:
         raise ETLError(f"Missing required columns: {missing_columns}")
-    
-    # Check for null values
-    null_counts = df[required_columns].isnull().sum()
-    for col, count in null_counts.items():
-        if count > 0:
-            errors.append(f"Found {count} null values in column '{col}'")
-    
-    # Validate quantity > 0
-    invalid_qty = (df['quantity'] <= 0).sum()
-    if invalid_qty > 0:
-        errors.append(f"Found {invalid_qty} rows with quantity <= 0")
-    
-    # Validate amount > 0
-    invalid_amount = (df['amount'] <= 0).sum()
-    if invalid_amount > 0:
-        errors.append(f"Found {invalid_amount} rows with amount <= 0")
-    
-    # Validate sale_date is datetime
-    try:
-        pd.to_datetime(df['sale_date'])
-    except Exception as e:
-        errors.append(f"Invalid date format in 'sale_date': {e}")
-    
+
+    quality = evaluate_data_quality(
+        df,
+        required_columns=required_columns,
+        check_duplicates=check_duplicates,
+    )
+    if quality["missing_values"] > 0:
+        errors.append(f"Found {quality['missing_values']} missing values")
+    if check_duplicates and quality["duplicate_rows"] > 0:
+        errors.append(f"Found {quality['duplicate_rows']} duplicate rows")
+    if quality["invalid_rows"] > 0:
+        for issue in quality["issues"]:
+            if "Found" in issue and "rows" in issue:
+                errors.append(issue)
+
     if errors:
-        logger.warning(f"Validation errors found: {'; '.join(errors)}")
+        logger.warning("Validation errors found: %s", "; ".join(errors))
     else:
         logger.info("Data validation passed")
-    
+
     return df, errors
 
 

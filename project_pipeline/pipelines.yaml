@@ -1,0 +1,14 @@
+pipelines:
+  - name: api_pipeline
+    source: API
+    handler: api_pipeline
+    interval: 60
+    max_retries: 3
+    enabled: true
+
+  - name: csv_pipeline
+    source: CSV
+    handler: csv_pipeline
+    interval: 60
+    max_retries: 3
+    enabled: true

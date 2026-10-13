@@ -8,6 +8,7 @@ from typing import Any
 
 import config
 from database.db import Database
+from pipelines.failure_handling import classify_failure
 
 logger = logging.getLogger(__name__)
 
@@ -16,31 +17,44 @@ def run_with_recovery(
     pipeline_name: str,
     pipeline_runner: Callable[..., dict[str, Any]],
     *runner_args: Any,
+    max_retries: int | None = None,
+    runner_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a pipeline and retry failures without stopping the scheduler."""
+    retry_limit = config.MAX_RETRIES if max_retries is None else max(0, int(max_retries))
+    runner_kwargs = runner_kwargs or {}
     last_result: dict[str, Any] = {
         "status": "FAILED",
         "rows_processed": 0,
         "error_message": "Pipeline did not run",
     }
 
-    for retry_count in range(config.MAX_RETRIES + 1):
+    for retry_count in range(retry_limit + 1):
         if retry_count:
             logger.warning(
                 "retry started: %s attempt %d/%d",
                 pipeline_name,
                 retry_count,
-                config.MAX_RETRIES,
+                retry_limit,
             )
 
         try:
-            last_result = pipeline_runner(*runner_args, retry_count=retry_count)
+            last_result = pipeline_runner(
+                *runner_args, **runner_kwargs, retry_count=retry_count
+            )
         except Exception as exc:
             logger.exception("Unhandled pipeline runner error: %s", exc)
+            failure_type, retryable = classify_failure(exc)
+            error_message = str(exc) or exc.__class__.__name__
             last_result = {
                 "status": "FAILED",
                 "rows_processed": 0,
-                "error_message": str(exc),
+                "error_message": error_message,
+                "pipeline_name": pipeline_name,
+                "retry_count": retry_count,
+                "failure_type": failure_type,
+                "failure_category": failure_type,
+                "retryable": retryable,
             }
 
         if last_result.get("status") == "SUCCESS":
@@ -48,8 +62,16 @@ def run_with_recovery(
                 logger.info("retry completed: %s succeeded on attempt %d", pipeline_name, retry_count)
             return last_result
 
+        failure_type, retryable = classify_failure(
+            last_result.get("error_message") or last_result.get("failure_category") or last_result.get("failure_type"),
+            default_retryable=bool(last_result.get("retryable", False)),
+        )
+        last_result["failure_type"] = failure_type
+        last_result["failure_category"] = failure_type
+        last_result["retryable"] = retryable
+
         execution_id = last_result.get("execution_id")
-        if retry_count < config.MAX_RETRIES:
+        if last_result["retryable"] and retry_count < retry_limit:
             _mark_retrying(execution_id, last_result)
             continue
 
@@ -59,6 +81,7 @@ def run_with_recovery(
             retry_count,
             last_result.get("error_message"),
         )
+        break
 
     return last_result
 
@@ -72,9 +95,11 @@ def _mark_retrying(execution_id: Any, result: dict[str, Any]) -> None:
     try:
         db.connect()
         db.execute(
-            "UPDATE pipeline_execution SET status = 'RETRYING', execution_log = "
-            "CONCAT_WS(E'\\n', execution_log, %s) WHERE execution_id = %s",
+            "UPDATE pipeline_execution SET status = 'RETRYING', failure_type = COALESCE(%s, failure_type), failure_category = COALESCE(%s, failure_category), retryable = %s, execution_log = CONCAT_WS(E'\\n', execution_log, %s) WHERE execution_id = %s",
             (
+                result.get("failure_type"),
+                result.get("failure_category"),
+                bool(result.get("retryable", True)),
                 f"retry started after failure: {result.get('error_message')}",
                 execution_id,
             ),

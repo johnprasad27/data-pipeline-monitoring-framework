@@ -19,6 +19,16 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent
 
 # =====================================================================
+# Pipeline registration and monitoring configuration
+# =====================================================================
+PIPELINES_CONFIG_PATH = BASE_DIR / os.getenv("PIPELINES_CONFIG_PATH", "pipelines.yaml")
+DATA_FRESHNESS_FRESH_SECONDS = max(30, int(os.getenv("DATA_FRESHNESS_FRESH_SECONDS", "120")))
+DATA_FRESHNESS_WARNING_SECONDS = max(
+    DATA_FRESHNESS_FRESH_SECONDS,
+    int(os.getenv("DATA_FRESHNESS_WARNING_SECONDS", "300")),
+)
+
+# =====================================================================
 # PostgreSQL Database Configuration
 # =====================================================================
 DB_HOST = os.getenv("DB_HOST", "localhost")

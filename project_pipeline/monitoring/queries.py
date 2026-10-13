@@ -20,7 +20,14 @@ def pipeline_option_name(option: str | None) -> str | None:
         "API Pipeline": "api_pipeline",
         "CSV Pipeline": "csv_pipeline",
     }
-    return mapping.get(option)
+    if option in mapping:
+        return mapping[option]
+    if option is None:
+        return None
+    normalized = option.strip().lower().replace(" ", "_")
+    if normalized.endswith("_pipeline"):
+        return normalized
+    return normalized
 
 
 def total_executions(db: Database, pipeline_name: str | None = None) -> int:
@@ -143,27 +150,56 @@ def rows_per_pipeline(db: Database) -> List[Dict[str, Any]]:
 
 
 def get_all_pipelines(db: Database) -> List[Dict[str, Any]]:
-    """Return latest execution row per pipeline (one row per pipeline)."""
+    """Return registry entries and their latest execution, including unrun pipelines."""
     try:
         results = db.fetch_all(
             """
-            SELECT DISTINCT ON (pipeline_name)
-                pipeline_name,
-                status,
-                rows_processed,
-                COALESCE(execution_duration_seconds, EXTRACT(EPOCH FROM (end_time - start_time))) AS execution_duration_seconds,
-                retry_count,
-                created_at,
-                source_type,
-                start_time,
-                end_time
-            FROM pipeline_execution
-            ORDER BY pipeline_name, execution_id DESC
+            WITH latest AS (
+                SELECT DISTINCT ON (pipeline_name)
+                    pipeline_name, status, rows_processed,
+                    COALESCE(execution_duration_seconds,
+                        EXTRACT(EPOCH FROM (end_time - start_time))) AS execution_duration_seconds,
+                    retry_count, created_at, source_type, start_time, end_time,
+                    COALESCE(failure_category, failure_type) AS failure_category
+                FROM pipeline_execution
+                ORDER BY pipeline_name, execution_id DESC
+            )
+            SELECT COALESCE(registry.pipeline_name, latest.pipeline_name) AS pipeline_name,
+                   COALESCE(registry.pipeline_type, latest.source_type) AS source_type,
+                   CASE WHEN registry.enabled IS FALSE THEN 'DISABLED'
+                        ELSE COALESCE(latest.status, 'UNKNOWN') END AS status,
+                   COALESCE(latest.rows_processed, 0) AS rows_processed,
+                   latest.execution_duration_seconds,
+                   COALESCE(latest.retry_count, 0) AS retry_count,
+                   latest.created_at,
+                   latest.start_time,
+                   latest.end_time,
+                   latest.failure_category,
+                   registry.enabled,
+                   registry.created_at AS registered_at
+            FROM pipeline_registry AS registry
+            FULL OUTER JOIN latest USING (pipeline_name)
+            ORDER BY COALESCE(registry.pipeline_name, latest.pipeline_name)
             """
         )
         return results
     except Exception as e:
         raise DatabaseError(f"Failed to fetch pipelines: {e}") from e
+
+
+def get_registered_pipelines(db: Database) -> List[Dict[str, Any]]:
+    """Return configured pipelines, including disabled entries with no history."""
+    try:
+        return db.fetch_all(
+            """
+            SELECT pipeline_name, pipeline_type, source_config, interval_seconds,
+                   max_retries, enabled, created_at, updated_at
+            FROM pipeline_registry
+            ORDER BY pipeline_name
+            """
+        )
+    except Exception as e:
+        raise DatabaseError(f"Failed to fetch registered pipelines: {e}") from e
 
 
 def get_pipeline_history(db: Database, pipeline_name: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -198,6 +234,18 @@ def get_latest_execution(db: Database, pipeline_name: str) -> Optional[Dict[str,
         return row
     except Exception as e:
         raise DatabaseError(f"Failed to fetch latest execution for {pipeline_name}: {e}") from e
+
+
+def get_latest_quality_execution(db: Database, pipeline_name: str) -> Optional[Dict[str, Any]]:
+    """Return the latest execution that includes CSV quality metrics."""
+    try:
+        return db.fetch_one(
+            "SELECT * FROM pipeline_execution WHERE pipeline_name = %s "
+            "AND input_rows IS NOT NULL ORDER BY execution_id DESC LIMIT 1",
+            (pipeline_name,),
+        )
+    except Exception as e:
+        raise DatabaseError(f"Failed to fetch quality metrics for {pipeline_name}: {e}") from e
 
 
 def get_pipeline_statistics(db: Database, pipeline_name: str) -> Dict[str, Any]:

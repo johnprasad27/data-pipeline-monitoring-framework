@@ -81,6 +81,10 @@ CREATE TABLE pipeline_execution (
 
 ALTER TABLE pipeline_execution
     ADD COLUMN IF NOT EXISTS execution_log TEXT;
+ALTER TABLE pipeline_execution
+    ADD COLUMN IF NOT EXISTS failure_category VARCHAR(64);
+ALTER TABLE pipeline_execution
+    ADD COLUMN IF NOT EXISTS retryable BOOLEAN;
 
 -- Performance indexes for dashboard and monitoring queries
 CREATE INDEX idx_pipeline_execution_pipeline_name ON pipeline_execution(pipeline_name);
@@ -117,4 +121,3 @@ CREATE INDEX idx_pipeline_execution_created_at ON pipeline_execution(created_at)
 --   - Enable SLA compliance reporting
 --
 -- =====================================================================
-

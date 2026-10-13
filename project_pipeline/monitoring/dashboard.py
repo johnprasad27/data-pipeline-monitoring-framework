@@ -84,13 +84,6 @@ def main() -> None:
         st.divider()
         st.caption("© Data Pipeline Monitoring")
 
-    pipeline_filter = st.selectbox(
-        "Pipeline",
-        ["All Pipelines", "API Pipeline", "CSV Pipeline"],
-        index=0,
-    )
-    selected_pipeline = queries.pipeline_option_name(pipeline_filter)
-
     db = Database()
     try:
         db.connect()
@@ -99,6 +92,11 @@ def main() -> None:
         return
 
     try:
+        pipeline_rows = queries.get_all_pipelines(db)
+        pipeline_names = sorted({row["pipeline_name"] for row in pipeline_rows})
+        pipeline_filter = st.selectbox("Pipeline", ["All Pipelines", *pipeline_names])
+        selected_pipeline = queries.pipeline_option_name(pipeline_filter)
+
         event_key = f"{selected_pipeline or 'all'}:{queries.latest_execution_event_id(db, selected_pipeline)}"
         previous_event_key = st.session_state.get("last_dashboard_event_key")
         event_changed = previous_event_key is None or previous_event_key != event_key
@@ -110,7 +108,7 @@ def main() -> None:
                 "kpis": metrics.gather_kpis(db, selected_pipeline),
                 "rows_by_pipeline": metrics.get_rows_per_pipeline(db),
                 "history": metrics.get_execution_history(db, limit=500, pipeline_name=selected_pipeline),
-                "all_pipelines": queries.get_all_pipelines(db),
+                "all_pipelines": pipeline_rows,
             }
             st.session_state["dashboard_snapshot"] = snapshot
             st.session_state["dashboard_filter"] = selected_pipeline
@@ -153,7 +151,7 @@ def main() -> None:
         titles = ["Total Pipelines", "Successful Runs", "Failed Runs", "Rows Processed", "Avg Exec Duration"]
         if selected_pipeline is None:
             values = [
-                len(rows_by_pipeline or []),
+                len(pipelines or []),
                 kpis.get("successful_executions", 0),
                 kpis.get("failed_executions", 0),
                 kpis.get("total_rows_processed", 0),
@@ -189,6 +187,7 @@ def main() -> None:
                     duration = _format_duration(pipeline) or "0.00 s"
                     retries = pipeline.get("retry_count") if pipeline.get("retry_count") is not None else 0
                     last = str(pipeline.get("created_at") or "")
+                    failure_category = pipeline.get("failure_category") or "-"
 
                     if status == "SUCCESS":
                         badge_html = "<span class='status-badge status-success'>SUCCESS</span>"
@@ -206,6 +205,7 @@ def main() -> None:
                         <td>{rows}</td>
                         <td>{duration}</td>
                         <td>{retries}</td>
+                        <td>{failure_category}</td>
                         <td>{last}</td>
                         <td class='action-cell'>
                             <button class='btn btn-view'>View</button>
@@ -215,7 +215,7 @@ def main() -> None:
                     </tr>"""
             else:
                 table_rows_html = """<tr>
-                    <td colspan='8' style='text-align: center; color: #94A3B8; padding: 20px;'>No pipelines available</td>
+                    <td colspan='9' style='text-align: center; color: #94A3B8; padding: 20px;'>No pipelines available</td>
                 </tr>"""
 
             pipeline_table_html = f"""
@@ -348,6 +348,7 @@ def main() -> None:
     <th>Rows</th>
     <th>Duration</th>
     <th>Retries</th>
+    <th>Failure Category</th>
     <th>Last Executed</th>
     <th>Actions</th>
 </tr>
@@ -364,7 +365,7 @@ def main() -> None:
         else:
             latest = queries.get_latest_execution(db, selected_pipeline)
             if latest:
-                title_label = "API Pipeline" if selected_pipeline == "api_pipeline" else "CSV Pipeline"
+                title_label = selected_pipeline.replace("_", " ").title()
                 status = (latest.get("status") or "UNKNOWN").upper()
                 source = latest.get("source_type") or ""
                 rows = latest.get("rows_processed") if latest.get("rows_processed") is not None else 0
@@ -379,7 +380,50 @@ def main() -> None:
                 info_cols[2].markdown(f"<div class='card'><strong>Rows Processed</strong><br>{rows}</div>", unsafe_allow_html=True)
                 info_cols[3].markdown(f"<div class='card'><strong>Execution Duration</strong><br>{duration}</div>", unsafe_allow_html=True)
                 info_cols[4].markdown(f"<div class='card'><strong>Retry Count</strong><br>{retries}</div>", unsafe_allow_html=True)
+
+                health_value = latest.get("health_score")
+                quality_value = latest.get("data_quality_score")
+                freshness_value = latest.get("freshness_status") or "STALE"
+                failure_category = latest.get("failure_category") or latest.get("failure_type") or "-"
+                retryable_text = "YES" if latest.get("retryable") else "NO"
+                detail_cols = st.columns(5)
+                detail_cols[0].markdown(f"<div class='card'><strong>Health</strong><br>{health_value if health_value is not None else 'N/A'} / 100</div>", unsafe_allow_html=True)
+                detail_cols[1].markdown(f"<div class='card'><strong>Freshness</strong><br>{freshness_value}</div>", unsafe_allow_html=True)
+                detail_cols[2].markdown(f"<div class='card'><strong>Data Quality</strong><br>{quality_value if quality_value is not None else 'N/A'}%</div>", unsafe_allow_html=True)
+                detail_cols[3].markdown(f"<div class='card'><strong>Failure Category</strong><br>{failure_category}</div>", unsafe_allow_html=True)
+                detail_cols[4].markdown(f"<div class='card'><strong>Retryable</strong><br>{retryable_text}</div>", unsafe_allow_html=True)
                 st.markdown(f"<div class='card' style='margin-top: 1rem;'><strong>Last Executed</strong><br>{last_executed}</div>", unsafe_allow_html=True)
+
+                quality_execution = latest
+                if source.upper() == "CSV" and latest.get("input_rows") is None:
+                    quality_execution = queries.get_latest_quality_execution(
+                        db, selected_pipeline
+                    )
+                if source.upper() == "CSV" and quality_execution:
+                    st.subheader("Data Quality")
+                    if quality_execution.get("execution_id") != latest.get("execution_id"):
+                        st.caption(
+                            "Metrics from the most recent execution with recorded quality data."
+                        )
+                    quality_rows = [
+                        {
+                            "Metric": label,
+                            "Value": str(value) if value is not None else "N/A",
+                        }
+                        for label, value in (
+                            ("Input rows", quality_execution.get("input_rows")),
+                            ("Valid rows", quality_execution.get("valid_rows")),
+                            ("Rejected rows", quality_execution.get("rejected_rows")),
+                            ("Loaded rows", quality_execution.get("loaded_rows")),
+                            ("Missing columns", quality_execution.get("missing_column_count")),
+                            ("Null values", quality_execution.get("null_count")),
+                            ("Duplicates", quality_execution.get("duplicate_count")),
+                            ("Datatype errors", quality_execution.get("datatype_error_count")),
+                            ("Business rule errors", quality_execution.get("business_rule_error_count")),
+                            ("Quality status", quality_execution.get("data_quality_status")),
+                        )
+                    ]
+                    st.dataframe(pd.DataFrame(quality_rows), hide_index=True, width="stretch")
 
                 st.subheader(f"{title_label} Execution History")
                 history_rows = []
@@ -390,6 +434,7 @@ def main() -> None:
                         "Rows": item.get("rows_processed") or 0,
                         "Duration": _format_duration(item),
                         "Retries": item.get("retry_count") if item.get("retry_count") is not None else 0,
+                        "Failure Category": item.get("failure_category") or item.get("failure_type") or "-",
                         "Error": item.get("error_message") or "",
                     })
                 if history_rows:
@@ -407,9 +452,9 @@ def main() -> None:
                 if not df_rows.empty:
                     status_counts = df_rows['status'].fillna('UNKNOWN').value_counts().reset_index()
                     status_counts.columns = ['status', 'count']
-                    title_text = 'Success vs Failure' if selected_pipeline is None else f'{"API Pipeline" if selected_pipeline == "api_pipeline" else "CSV Pipeline"} Success vs Failure'
+                    title_text = 'Success vs Failure' if selected_pipeline is None else f'{selected_pipeline.replace("_", " ").title()} Success vs Failure'
                     fig = px.pie(status_counts, names='status', values='count', hole=0.5, title=title_text)
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width='stretch')
                 else:
                     st.info('No execution data for chart')
 
@@ -429,7 +474,7 @@ def main() -> None:
                     if dur_rows:
                         dur_df = pd.DataFrame(dur_rows)
                         fig2 = px.bar(dur_df, x='pipeline_name', y='duration', title='Execution Duration by Pipeline', labels={'duration':'Duration (s)', 'pipeline_name':'Pipeline'})
-                        st.plotly_chart(fig2, use_container_width=True)
+                        st.plotly_chart(fig2, width='stretch')
                 else:
                     dur_rows = []
                     for row in history:
@@ -443,9 +488,9 @@ def main() -> None:
                             dur_rows.append({'execution_time': row.get('created_at') or row.get('start_time'), 'duration': float(d)})
                     if dur_rows:
                         dur_df = pd.DataFrame(dur_rows)
-                        title_text = 'API Pipeline Execution Duration' if selected_pipeline == 'api_pipeline' else 'CSV Pipeline Execution Duration'
+                        title_text = f'{selected_pipeline.replace("_", " ").title()} Execution Duration'
                         fig2 = px.bar(dur_df, x='execution_time', y='duration', title=title_text, labels={'duration':'Duration (s)', 'execution_time':'Execution Time'})
-                        st.plotly_chart(fig2, use_container_width=True)
+                        st.plotly_chart(fig2, width='stretch')
                 if 'fig2' not in locals():
                     st.info('No duration data available')
         except Exception:
@@ -466,6 +511,7 @@ def main() -> None:
                             'Status': r.get('status'),
                             'Rows': r.get('rows_processed') or 0,
                             'Duration': _format_duration(r),
+                            'Failure Category': r.get('failure_category') or r.get('failure_type') or '-',
                             'Execution Time': r.get('created_at') or '',
                         })
                     st.table(pd.DataFrame(rows))
@@ -477,7 +523,7 @@ def main() -> None:
                 failed_runs = [r for r in (metrics.get_execution_history(db, limit=200) or []) if (r.get('status') or '').upper() == 'FAILED']
                 if failed_runs:
                     for r in failed_runs[:10]:
-                        st.markdown(f"<div class='card'><div><strong>{r.get('pipeline_name')}</strong> <div class='muted small'>{r.get('created_at')}</div></div><div style='color:var(--danger)'>{r.get('error_message') or ''}</div></div>", unsafe_allow_html=True)
+                        st.markdown(f"<div class='card'><div><strong>{r.get('pipeline_name')}</strong> <div class='muted small'>{r.get('created_at')}</div></div><div><strong>Failure Category:</strong> {r.get('failure_category') or r.get('failure_type') or 'UNKNOWN'}</div><div style='color:var(--danger)'>{r.get('error_message') or ''}</div></div>", unsafe_allow_html=True)
                 else:
                     st.markdown("<div class='card'><div style='text-align:center'>🎉 No failed pipelines.<br/>All pipelines executed successfully.</div></div>", unsafe_allow_html=True)
         else:
@@ -490,6 +536,7 @@ def main() -> None:
                         'Rows': row.get('rows_processed') or 0,
                         'Duration': _format_duration(row),
                         'Retries': row.get('retry_count') if row.get('retry_count') is not None else 0,
+                        'Failure Category': row.get('failure_category') or row.get('failure_type') or '-',
                         'Error': row.get('error_message') or '',
                     }
                     for row in history[:10]
@@ -501,7 +548,7 @@ def main() -> None:
             failed_runs = metrics.get_pipeline_failures(db, selected_pipeline, limit=20)
             if failed_runs:
                 for r in failed_runs[:10]:
-                    st.markdown(f"<div class='card'><div><strong>{r.get('pipeline_name')}</strong> <div class='muted small'>{r.get('created_at')}</div></div><div style='color:var(--danger)'>{r.get('error_message') or ''}</div></div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='card'><div><strong>{r.get('pipeline_name')}</strong> <div class='muted small'>{r.get('created_at')}</div></div><div><strong>Failure Category:</strong> {r.get('failure_category') or r.get('failure_type') or 'UNKNOWN'}</div><div style='color:var(--danger)'>{r.get('error_message') or ''}</div></div>", unsafe_allow_html=True)
             else:
                 st.markdown("<div class='card'><div style='text-align:center'>🎉 No failed executions for this pipeline.</div></div>", unsafe_allow_html=True)
 
