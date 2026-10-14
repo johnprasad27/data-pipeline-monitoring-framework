@@ -143,6 +143,20 @@ def run_api_pipeline(
         df = read_api_data(client)
         _log_task("Extract", "SUCCESS", t0)
 
+        # Completeness check if expected_rows is configured
+        expected_rows = (source_config or {}).get("expected_rows")
+        if expected_rows is not None:
+            try:
+                expected_rows = int(expected_rows)
+            except (ValueError, TypeError):
+                expected_rows = None
+
+        if expected_rows is not None and expected_rows > 0 and len(df) < expected_rows:
+            discrepancy = expected_rows - len(df)
+            comp_error = f"Incomplete extraction: expected {expected_rows} rows, but received only {len(df)} rows ({discrepancy} missing)"
+            _log_task("Validate", "FAILED", t0, comp_error)
+            raise ETLError(comp_error)
+
         t0 = datetime.now()
         quality_report = evaluate_data_quality(df, check_duplicates=False)
         data_quality_score = quality_report["score"]
@@ -201,6 +215,7 @@ def run_api_pipeline(
                     data_quality_score=data_quality_score,
                     freshness_status=freshness_status,
                     health_score=health_score,
+                    expected_rows=expected_rows,
                 )
             except Exception as e:
                 logger.error("Failed to log pipeline execution: %s", e)
@@ -222,6 +237,7 @@ def run_api_pipeline(
         "data_quality_score": data_quality_score,
         "freshness_status": freshness_status,
         "health_score": health_score,
+        "expected_rows": expected_rows,
     }
 
 

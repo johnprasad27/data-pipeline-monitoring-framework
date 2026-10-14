@@ -66,13 +66,30 @@ def pipeline_runs_page() -> None:
     finally:
         db.close()
 
-    # Discover all registered and historical pipeline names
-    registered_names = {r["pipeline_name"] for r in registered if r.get("pipeline_name")}
-    history_names = {r["pipeline_name"] for r in all_rows if r.get("pipeline_name")}
-    pipeline_names = sorted(registered_names | history_names)
+    # Discover currently active registered pipelines
+    registration_by_name = {r["pipeline_name"]: r for r in registered if r.get("pipeline_name")}
+    pipeline_names = sorted(registration_by_name.keys())
+
+    # Filter executions so only non-deleted pipelines and active incarnations appear
+    active_rows: list[dict[str, Any]] = []
+    for row in all_rows:
+        pname = str(row.get("pipeline_name") or "")
+        if pname in registration_by_name:
+            reg_created = registration_by_name[pname].get("created_at")
+            row_ts = row.get("created_at") or row.get("start_time")
+            if reg_created and row_ts:
+                try:
+                    import pandas as pd
+                    reg_dt = pd.to_datetime(reg_created)
+                    r_dt = pd.to_datetime(row_ts)
+                    if r_dt < reg_dt:
+                        continue
+                except Exception:
+                    pass
+            active_rows.append(row)
 
     # Filter executions by selected time window
-    recent_rows = filter_rows_by_window(all_rows, window_option)
+    recent_rows = filter_rows_by_window(active_rows, window_option)
     pipeline_run_counts = build_pipeline_run_counts(recent_rows, pipeline_names)
 
     # Summary KPI row for the selected time window

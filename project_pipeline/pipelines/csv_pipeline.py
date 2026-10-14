@@ -197,6 +197,23 @@ def run_csv_pipeline(
         source_frame = read_csv(csv_path)
         _log_task("Extract", "SUCCESS", t0)
 
+        # Completeness check if expected_rows is configured
+        expected_rows = (source_config or {}).get("expected_rows")
+        if expected_rows is not None:
+            try:
+                expected_rows = int(expected_rows)
+            except (ValueError, TypeError):
+                expected_rows = None
+
+        if expected_rows is not None and expected_rows > 0 and len(source_frame) < expected_rows:
+            discrepancy = expected_rows - len(source_frame)
+            comp_error = f"Incomplete extraction: expected {expected_rows} rows, but received only {len(source_frame)} rows ({discrepancy} missing)"
+            quality_report["input_rows"] = len(source_frame)
+            quality_report["data_quality_status"] = "FAIL"
+            quality_report["reasons"].append(comp_error)
+            _log_task("Validate", "FAILED", t0, comp_error)
+            raise ETLError(comp_error)
+
         # Check if generic schema_config is present
         schema_config = (source_config or {}).get("schema_config")
         if schema_config:
@@ -291,10 +308,11 @@ def run_csv_pipeline(
         )
         if reconciliation_error:
             status = "FAILED"
-            error_message = "; ".join(
-                part for part in (error_message, reconciliation_error) if part
-            )
-            failure_type, retryable = classify_failure(error_message)
+            if not error_message:
+                error_message = reconciliation_error
+                failure_type, retryable = classify_failure(reconciliation_error)
+            else:
+                error_message = f"{error_message}; {reconciliation_error}"
 
         # Finalize the row created when the pipeline started.
         end_time = datetime.now()
@@ -347,6 +365,7 @@ def run_csv_pipeline(
                     datatype_error_count=quality_report["datatype_error_count"],
                     business_rule_error_count=quality_report["business_rule_error_count"],
                     data_quality_status=quality_report["data_quality_status"],
+                    expected_rows=expected_rows,
                 )
             except DatabaseError as e:
                 logger.error(f"Failed to log pipeline execution: {e}")
@@ -368,6 +387,7 @@ def run_csv_pipeline(
         "data_quality_score": data_quality_score,
         "freshness_status": freshness_status,
         "health_score": health_score,
+        "expected_rows": expected_rows,
         **quality_report,
     }
 

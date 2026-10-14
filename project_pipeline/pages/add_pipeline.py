@@ -85,9 +85,30 @@ if pending_delete:
                 try:
                     db.connect()
                     delete_disabled_pipeline(db, pending_delete)
+                    st.cache_data.clear()
                     st.session_state.pop("pipeline_delete_confirmation", None)
+                    st.session_state.pop("dashboard_snapshot", None)
+                    st.session_state.pop("last_dashboard_event_key", None)
+                    if st.session_state.get("dashboard_pipeline_filter") == pending_delete:
+                        st.session_state["dashboard_pipeline_filter"] = "All Pipelines"
+                    if st.session_state.get("dashboard_filter") == pending_delete:
+                        st.session_state.pop("dashboard_filter", None)
+                    if st.session_state.get("history_pipeline_filter") == pending_delete:
+                        st.session_state["history_pipeline_filter"] = "All Pipelines"
+
+                    # Check if pipeline is defined in static configuration file
+                    yaml_note = ""
+                    try:
+                        from pipelines.registry import load_pipeline_registry
+                        import config
+                        yaml_configs = load_pipeline_registry(config.PIPELINES_CONFIG_PATH)
+                        if pending_delete in yaml_configs:
+                            yaml_note = f" (Note: '{pending_delete}' remains listed in pipelines.yaml, but its database tombstone prevents it from being scheduled or resurrected.)"
+                    except Exception:
+                        pass
+
                     st.session_state["pipeline_delete_success"] = (
-                        f"Pipeline '{pending_delete}' was deleted. Execution history was retained."
+                        f"Pipeline '{pending_delete}' was deleted. Execution history was retained.{yaml_note}"
                     )
                     st.rerun()
                 except Exception as exc:

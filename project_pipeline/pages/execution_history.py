@@ -74,6 +74,9 @@ def execution_history_page() -> None:
         # Filter controls
         f1, f2, f3, f4 = st.columns([1.5, 1.2, 1.3, 1])
         with f1:
+            current_pipeline_filter = st.session_state.get("history_pipeline_filter", "All Pipelines")
+            if current_pipeline_filter not in ["All Pipelines", *all_pipeline_names]:
+                st.session_state["history_pipeline_filter"] = "All Pipelines"
             pipeline_filter = st.selectbox(
                 "Pipeline",
                 ["All Pipelines", *all_pipeline_names],
@@ -422,9 +425,27 @@ def execution_history_page() -> None:
             )
             return
 
+        active_registry_map = {p["pipeline_name"]: p for p in registered_pipelines}
         table_rows: list[dict[str, Any]] = []
         for r in records:
             status_val = (r.get("status") or "").upper()
+            raw_pname = r.get("pipeline_name") or "Unknown"
+
+            # Check if this execution belongs to a deleted pipeline or pre-creation incarnation
+            is_deleted = False
+            if raw_pname not in active_registry_map:
+                is_deleted = True
+            else:
+                reg_created = active_registry_map[raw_pname].get("created_at")
+                r_ts = r.get("created_at") or r.get("start_time")
+                if reg_created and r_ts:
+                    try:
+                        if pd.to_datetime(r_ts) < pd.to_datetime(reg_created):
+                            is_deleted = True
+                    except Exception:
+                        pass
+
+            pipeline_display = f"{raw_pname} (Deleted)" if is_deleted else raw_pname
 
             # Failure category and error details must come from THAT execution's own record.
             # For successful runs (or any run with no failure info), show "-" for failure category and error details.
@@ -442,7 +463,7 @@ def execution_history_page() -> None:
                 error_details = "-"
 
             table_rows.append({
-                "Pipeline": r.get("pipeline_name") or "Unknown",
+                "Pipeline": pipeline_display,
                 "Status": status_val,
                 "Rows": r.get("rows_processed") if r.get("rows_processed") is not None else 0,
                 "Duration": format_duration(r),
@@ -462,10 +483,22 @@ def execution_history_page() -> None:
                     exec_label = f"Execution #{exec_id} &nbsp; " if exec_id else ""
                     cat = f.get("failure_category") or f.get("failure_type") or "UNKNOWN"
                     error_msg = f.get("error_message") or "No error message recorded"
+                    raw_f_name = f.get("pipeline_name") or "Unknown"
+                    is_deleted_run = raw_f_name not in active_registry_map
+                    if not is_deleted_run:
+                        reg_created = active_registry_map[raw_f_name].get("created_at")
+                        f_ts = f.get("created_at") or f.get("start_time")
+                        if reg_created and f_ts:
+                            try:
+                                if pd.to_datetime(f_ts) < pd.to_datetime(reg_created):
+                                    is_deleted_run = True
+                            except Exception:
+                                pass
+                    del_badge = " <span class='status-pill' style='margin-left:6px; font-size:10px; background:rgba(148,163,184,0.15); color:#94A3B8; border:1px solid rgba(148,163,184,0.3);'>DELETED</span>" if is_deleted_run else ""
                     st.markdown(
                         f"<div class='card' style='margin-bottom:0.6rem;'>"
                         f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
-                        f"<div><strong>{f.get('pipeline_name')}</strong> <span class='status-pill status-failed' style='margin-left:6px; font-size:10px;'>FAILED</span></div>"
+                        f"<div><strong>{raw_f_name}</strong>{del_badge} <span class='status-pill status-failed' style='margin-left:6px; font-size:10px;'>FAILED</span></div>"
                         f"<div class='muted small'>{exec_label}{f.get('created_at')}</div>"
                         f"</div>"
                         f"<div style='margin-top:0.4rem; font-size:0.85rem;'><strong>Failure Category:</strong> {cat}</div>"

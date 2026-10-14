@@ -5,6 +5,10 @@ Reproduces the exact failure WITHOUT running against the live database or modify
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
@@ -70,4 +74,4 @@ def test_reproduce_customer_pipeline_generic_load_failure(tmp_path):
     assert result["rows_processed"] == 0
     assert "relation \"pipeline_generic_data\" does not exist" in result["error_message"]
     assert "CSV load count mismatch: 3 valid rows, 0 loaded rows" in result["error_message"]
-    assert result["failure_category"] == "UNKNOWN"
+    assert result["failure_category"] == "DATABASE_ERROR"

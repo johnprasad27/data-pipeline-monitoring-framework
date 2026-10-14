@@ -80,6 +80,17 @@ def validate_pipeline_registration(
         normalized_source = dict(source_config)
         normalized_source["url"] = url
 
+    if "expected_rows" in source_config:
+        val = source_config.get("expected_rows")
+        if val is not None and val != "":
+            try:
+                int_val = int(val)
+                if int_val < 0:
+                    raise ValueError("Expected row count must be zero or greater.")
+                normalized_source["expected_rows"] = int_val
+            except (ValueError, TypeError):
+                raise ValueError("Expected row count must be a valid integer.")
+
     return {
         "name": normalized_name,
         "pipeline_type": normalized_type,
@@ -352,13 +363,15 @@ def seed_pipeline_registry(db: Database) -> None:
     db.connection.commit()
 
 
-def load_registered_pipeline_configs(db: Database) -> list[dict[str, Any]]:
+def load_registered_pipeline_configs(db: Database, include_deleted: bool = False) -> list[dict[str, Any]]:
     """Read database-backed pipeline configuration for scheduler and UI consumers."""
+    where_clause = "" if include_deleted else "WHERE deleted_at IS NULL"
     rows = db.fetch_all(
-        """
+        f"""
         SELECT pipeline_name, pipeline_type, source_config, interval_seconds,
-               max_retries, enabled, created_at, updated_at
+               max_retries, enabled, created_at, updated_at, deleted_at
         FROM pipeline_registry
+        {where_clause}
         ORDER BY pipeline_name
         """
     )
@@ -373,14 +386,21 @@ def load_registered_pipeline_configs(db: Database) -> list[dict[str, Any]]:
 def _sync_configured_pipeline_registry(
     db: Database, configured: dict[str, dict[str, Any]]
 ) -> None:
-    """Make YAML registrations visible to monitoring without overwriting UI edits."""
-    existing = {
-        row["pipeline_name"].casefold()
-        for row in db.fetch_all("SELECT pipeline_name FROM pipeline_registry")
-    }
+    """Make YAML registrations visible to monitoring without overwriting UI edits or resurrecting deleted pipelines."""
+    rows = db.fetch_all("SELECT pipeline_name, deleted_at FROM pipeline_registry")
+    existing_active = set()
+    tombstoned = set()
+    for row in rows:
+        name_cf = row["pipeline_name"].casefold()
+        if row.get("deleted_at") is not None:
+            tombstoned.add(name_cf)
+        else:
+            existing_active.add(name_cf)
+
     inserted = False
     for pipeline in configured.values():
-        if pipeline["name"].casefold() in existing:
+        name_cf = pipeline["name"].casefold()
+        if name_cf in existing_active or name_cf in tombstoned:
             continue
         db.execute(
             """
@@ -425,6 +445,15 @@ def get_enabled_pipeline_configs(path: str | Path | None = None) -> list[dict[st
     try:
         db.connect()
         _sync_configured_pipeline_registry(db, configured)
+        tombstones = {
+            row["pipeline_name"].casefold()
+            for row in db.fetch_all("SELECT pipeline_name FROM pipeline_registry WHERE deleted_at IS NOT NULL")
+        }
+        # Remove tombstoned entries from static config mapping so scheduler never executes them
+        configured = {
+            k: v for k, v in configured.items()
+            if k.casefold() not in tombstones
+        }
         database_rows = load_registered_pipeline_configs(db)
         for row in database_rows:
             name = row["pipeline_name"]
@@ -467,11 +496,40 @@ def register_pipeline(
     registration = validate_pipeline_registration(
         name, pipeline_type, source_config, interval_seconds, max_retries
     )
-    if db.fetch_one(
-        "SELECT 1 FROM pipeline_registry WHERE LOWER(pipeline_name) = LOWER(%s)",
+    existing = db.fetch_one(
+        "SELECT pipeline_name, deleted_at FROM pipeline_registry WHERE LOWER(pipeline_name) = LOWER(%s)",
         (registration["name"],),
-    ):
+    )
+    if existing and existing.get("deleted_at") is None:
         raise ValueError("Pipeline name already exists.")
+
+    if existing and existing.get("deleted_at") is not None:
+        # Reusing a deleted pipeline name: resurrect as a clean new pipeline with new created_at
+        db.execute(
+            """
+            UPDATE pipeline_registry
+            SET pipeline_name = %s,
+                pipeline_type = %s,
+                source_config = %s::jsonb,
+                interval_seconds = %s,
+                max_retries = %s,
+                enabled = %s,
+                created_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP,
+                deleted_at = NULL
+            WHERE LOWER(pipeline_name) = LOWER(%s)
+            """,
+            (
+                registration["name"],
+                registration["pipeline_type"],
+                json.dumps(registration["source_config"]),
+                registration["interval_seconds"],
+                registration["max_retries"],
+                bool(enabled),
+                registration["name"],
+            ),
+        )
+        return registration | {"enabled": bool(enabled)}
 
     try:
         db.execute(
@@ -492,7 +550,7 @@ def register_pipeline(
         )
     except DatabaseError as exc:
         if db.fetch_one(
-            "SELECT 1 FROM pipeline_registry WHERE LOWER(pipeline_name) = LOWER(%s)",
+            "SELECT 1 FROM pipeline_registry WHERE LOWER(pipeline_name) = LOWER(%s) AND deleted_at IS NULL",
             (registration["name"],),
         ):
             raise ValueError("Pipeline name already exists.") from exc
@@ -510,14 +568,50 @@ def set_pipeline_enabled(db: Database, name: str, enabled: bool) -> None:
         raise ValueError("Pipeline was not found.")
 
 
-def delete_disabled_pipeline(db: Database, name: str) -> None:
-    """Delete one disabled registry row; execution history is never modified."""
+def delete_disabled_pipeline(db: Database, name: str) -> bool:
+    """Soft-delete one disabled registry row; execution history is never modified."""
+    # Check if an execution is currently RUNNING
+    try:
+        running = db.fetch_one(
+            "SELECT 1 FROM pipeline_execution WHERE pipeline_name = %s AND status = 'RUNNING'",
+            (name,),
+        )
+        if running and isinstance(running, dict) and any(running.values()):
+            raise ValueError(
+                f"Cannot delete pipeline '{name}' while an execution is currently RUNNING. Please wait for the execution to finish."
+            )
+    except ValueError:
+        raise
+    except Exception:
+        pass
+
     deleted = db.execute(
-        "DELETE FROM pipeline_registry WHERE pipeline_name = %s AND enabled = FALSE",
+        "UPDATE pipeline_registry SET deleted_at = CURRENT_TIMESTAMP, enabled = FALSE "
+        "WHERE pipeline_name = %s AND enabled = FALSE AND deleted_at IS NULL",
         (name,),
     )
     if not deleted:
+        # Check if it was already deleted or does not exist (idempotent), or if it is currently enabled
+        try:
+            row = db.fetch_one(
+                "SELECT enabled, deleted_at FROM pipeline_registry WHERE pipeline_name = %s",
+                (name,),
+            )
+            if isinstance(row, dict):
+                if row.get("deleted_at") is not None:
+                    return False
+                if not row:
+                    return False
+                if row.get("enabled"):
+                    raise ValueError("Only a disabled registered pipeline can be deleted.")
+            elif row is None:
+                return False
+        except ValueError:
+            raise
+        except Exception:
+            return False
         raise ValueError("Only a disabled registered pipeline can be deleted.")
+    return True
 
 
 def resolve_pipeline_runner(handler_name: str, function_name: str | None = None):

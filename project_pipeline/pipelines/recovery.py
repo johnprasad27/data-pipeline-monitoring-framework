@@ -13,6 +13,25 @@ from pipelines.failure_handling import classify_failure
 logger = logging.getLogger(__name__)
 
 
+def _is_pipeline_deleted(pipeline_name: str) -> bool:
+    """Check if pipeline is explicitly marked deleted in the registry."""
+    try:
+        db = Database()
+        db.connect()
+        try:
+            row = db.fetch_one(
+                "SELECT deleted_at FROM pipeline_registry WHERE pipeline_name = %s",
+                (pipeline_name,),
+            )
+            if row and row.get("deleted_at") is not None:
+                return True
+            return False
+        finally:
+            db.close()
+    except Exception:
+        return False
+
+
 def run_with_recovery(
     pipeline_name: str,
     pipeline_runner: Callable[..., dict[str, Any]],
@@ -32,6 +51,12 @@ def run_with_recovery(
 
     for retry_count in range(retry_limit + 1):
         if retry_count:
+            if _is_pipeline_deleted(pipeline_name):
+                logger.info("retry skipped: pipeline %s was deleted", pipeline_name)
+                last_result["status"] = "FAILED"
+                last_result["error_message"] = "skipped: pipeline deleted"
+                last_result["retryable"] = False
+                return last_result
             logger.warning(
                 "retry started: %s attempt %d/%d",
                 pipeline_name,
@@ -82,8 +107,19 @@ def run_with_recovery(
 
         execution_id = last_result.get("execution_id")
         if last_result["retryable"] and retry_count < retry_limit:
+            if _is_pipeline_deleted(pipeline_name):
+                logger.info("recovery skipped: pipeline %s was deleted", pipeline_name)
+                last_result["error_message"] = "skipped: pipeline deleted"
+                last_result["retryable"] = False
+                break
             _mark_retrying(execution_id, last_result)
             continue
+
+        err_text = str(last_result.get("error_message") or "").lower()
+        if any(tok in err_text for tok in ("data incomplete", "incomplete data", "incomplete extraction", "missing records")):
+            last_result["failure_category"] = "DATA_INCOMPLETE"
+            last_result["failure_type"] = "FAILED — DATA INCOMPLETE"
+            last_result["status_display"] = "FAILED — DATA INCOMPLETE"
 
         logger.error(
             "pipeline failed permanently: %s after %d retries: %s",

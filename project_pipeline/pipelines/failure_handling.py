@@ -73,7 +73,9 @@ def classify_failure(error: Any, *, default_retryable: bool = False) -> tuple[st
                 return "DATABASE_ERROR", True
             return "DATABASE_ERROR", False
         if isinstance(cause, DatabaseError):
-            return "DATABASE_ERROR", False
+            cause_message = str(cause).lower()
+            retryable = any(token in cause_message for token in RETRYABLE_DATABASE_MESSAGES)
+            return "DATABASE_ERROR", retryable
         cause = cause.__cause__ or cause.__context__
 
     if not message:
@@ -118,6 +120,18 @@ def classify_failure(error: Any, *, default_retryable: bool = False) -> tuple[st
     )):
         return "FILE_ERROR", False
     if any(token in text for token in (
+        "data incomplete",
+        "incomplete data",
+        "incomplete extraction",
+        "expected rows mismatch",
+        "completeness validation",
+        "incomplete row count",
+        "missing records from source",
+        "partial extraction",
+    )):
+        return "DATA_QUALITY_ERROR", True
+
+    if any(token in text for token in (
         "missing required columns",
         "required column",
         "required columns",
@@ -131,10 +145,30 @@ def classify_failure(error: Any, *, default_retryable: bool = False) -> tuple[st
         "invalid records",
         "validation failed",
         "invalid sale date",
+        "load count mismatch",
+        "reconciliation failed",
     )):
         return "DATA_QUALITY_ERROR", False
 
-    if any(token in text for token in ("database", "postgres", "psycopg", "sql error")):
+    if any(token in text for token in (
+        "database",
+        "postgres",
+        "psycopg",
+        "sql error",
+        "relation",
+        "does not exist",
+        "undefined_table",
+        "permission denied",
+        "generic load failed",
+        "duplicate key",
+        "unique constraint",
+        "foreign key",
+        "not-null constraint",
+        "check constraint",
+        "invalid input syntax",
+        "syntax error",
+        "execute failed",
+    )):
         retryable = any(token in text for token in RETRYABLE_DATABASE_MESSAGES)
         return "DATABASE_ERROR", retryable
 

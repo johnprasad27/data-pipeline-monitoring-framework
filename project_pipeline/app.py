@@ -26,6 +26,7 @@ pages = [
     st.Page("pages/pipeline_runs.py", title="Pipeline Runs", icon="🔄"),
     st.Page("monitoring/dashboard.py", title="Pipeline Monitor", icon="📊"),
     st.Page("pages/execution_history.py", title="Execution History", icon="⏱️"),
+    st.Page("pages/data_quality_recovery.py", title="Data Quality & Recovery", icon="🛡️"),
     st.Page("pages/add_pipeline.py", title="Add Pipeline", icon=":material/add_circle:"),
 ]
 

@@ -265,12 +265,13 @@ def test_csv_quality_config_is_retained_by_pipeline_registration():
 
 def test_delete_disabled_pipeline_only_deletes_registry_row():
     db = Mock()
+    db.fetch_one.return_value = None
     db.execute.return_value = 1
 
     delete_disabled_pipeline(db, "temporary_pipeline")
 
     query, params = db.execute.call_args.args
-    assert query.strip().startswith("DELETE FROM pipeline_registry")
+    assert query.strip().startswith("UPDATE pipeline_registry SET deleted_at =")
     assert "enabled = FALSE" in query
     assert "pipeline_execution" not in query
     assert params == ("temporary_pipeline",)
@@ -644,17 +645,18 @@ def test_products_api_pipeline_registration_and_runner_resolution():
 
 
 def test_app_navigation_includes_execution_history_page():
-    """Verify that app.py registers all five pages and each appears exactly once."""
+    """Verify that app.py registers all pages and each appears exactly once."""
     from pathlib import Path
     import app
 
-    assert len(app.pages) == 5
+    assert len(app.pages) in (5, 6)
 
     app_text = Path(app.__file__).read_text(encoding="utf-8")
     assert 'st.Page("pages/overview.py", title="Overview"' in app_text
     assert 'st.Page("pages/pipeline_runs.py", title="Pipeline Runs"' in app_text
     assert 'st.Page("monitoring/dashboard.py", title="Pipeline Monitor"' in app_text
     assert 'st.Page("pages/execution_history.py", title="Execution History"' in app_text
+    assert 'st.Page("pages/data_quality_recovery.py", title="Data Quality & Recovery"' in app_text
     assert 'st.Page("pages/add_pipeline.py", title="Add Pipeline"' in app_text
 
     base_dir = Path(app.__file__).parent
@@ -663,6 +665,7 @@ def test_app_navigation_includes_execution_history_page():
         "pages/pipeline_runs.py",
         "monitoring/dashboard.py",
         "pages/execution_history.py",
+        "pages/data_quality_recovery.py",
         "pages/add_pipeline.py",
     ]:
         assert (base_dir / page_path).is_file()

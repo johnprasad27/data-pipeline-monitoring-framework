@@ -261,17 +261,34 @@ def build_task_instance_summary(
 # ------------------------------------------------------------------ #
 
 def build_overview_summary(database, selected_window: str = "Last 24 Hours") -> dict[str, Any]:
-    all_rows = queries.execution_history(database, limit=5000)
-    recent_rows = filter_rows_by_window(all_rows, selected_window)
-    counts = summarize_execution_counts(recent_rows)
     registered = queries.get_registered_pipelines(database)
     registration_by_name = {
         row["pipeline_name"]: row for row in registered
     }
-    pipeline_names = sorted(
-        set(registration_by_name)
-        | {str(row.get("pipeline_name")) for row in all_rows if row.get("pipeline_name")}
-    )
+    pipeline_names = sorted(registration_by_name.keys())
+
+    all_rows = queries.execution_history(database, limit=5000)
+    # Filter rows to only active, non-deleted pipelines and respect created_at for reused names
+    active_rows: list[dict[str, Any]] = []
+    for row in all_rows:
+        pname = str(row.get("pipeline_name") or "")
+        if pname in registration_by_name:
+            reg_created = registration_by_name[pname].get("created_at")
+            row_ts = _row_timestamp(row)
+            if reg_created and row_ts:
+                try:
+                    reg_dt = datetime.fromisoformat(str(reg_created).replace("Z", "+00:00"))
+                except Exception:
+                    try:
+                        reg_dt = datetime.strptime(str(reg_created), "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        reg_dt = None
+                if reg_dt and row_ts < reg_dt:
+                    continue
+            active_rows.append(row)
+
+    recent_rows = filter_rows_by_window(active_rows, selected_window)
+    counts = summarize_execution_counts(recent_rows)
     pipeline_health = get_pipeline_health(database, pipeline_names)
     for pipeline in pipeline_health:
         registration = registration_by_name.get(pipeline["pipeline_name"])

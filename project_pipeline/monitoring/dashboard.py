@@ -144,7 +144,15 @@ def main() -> None:
     try:
         pipeline_rows = queries.get_all_pipelines(db)
         pipeline_names = sorted({row["pipeline_name"] for row in pipeline_rows})
-        pipeline_filter = st.selectbox("Pipeline", ["All Pipelines", *pipeline_names])
+        # Reset stale selected value if it no longer exists
+        current_selection = st.session_state.get("dashboard_pipeline_filter", "All Pipelines")
+        if current_selection not in ["All Pipelines", *pipeline_names]:
+            st.session_state["dashboard_pipeline_filter"] = "All Pipelines"
+        pipeline_filter = st.selectbox(
+            "Pipeline",
+            ["All Pipelines", *pipeline_names],
+            key="dashboard_pipeline_filter",
+        )
         selected_pipeline = queries.pipeline_option_name(pipeline_filter)
 
         event_key = f"{selected_pipeline or 'all'}:{queries.latest_execution_event_id(db, selected_pipeline)}"
@@ -154,10 +162,26 @@ def main() -> None:
             st.session_state["last_dashboard_event_key"] = event_key
 
         if event_changed or "dashboard_snapshot" not in st.session_state or st.session_state.get("dashboard_filter") != selected_pipeline:
+            active_created = {row["pipeline_name"]: row.get("registered_at") for row in pipeline_rows}
+            raw_history = metrics.get_execution_history(db, limit=500, pipeline_name=selected_pipeline)
+            filtered_history = []
+            for r in raw_history:
+                pname = r.get("pipeline_name")
+                if pname in active_created:
+                    reg_created = active_created[pname]
+                    r_ts = r.get("created_at") or r.get("start_time")
+                    if reg_created and r_ts:
+                        try:
+                            if pd.to_datetime(r_ts) < pd.to_datetime(reg_created):
+                                continue
+                        except Exception:
+                            pass
+                    filtered_history.append(r)
+
             snapshot = {
                 "kpis": metrics.gather_kpis(db, selected_pipeline),
                 "rows_by_pipeline": metrics.get_rows_per_pipeline(db),
-                "history": metrics.get_execution_history(db, limit=500, pipeline_name=selected_pipeline),
+                "history": filtered_history,
                 "all_pipelines": pipeline_rows,
             }
             st.session_state["dashboard_snapshot"] = snapshot
