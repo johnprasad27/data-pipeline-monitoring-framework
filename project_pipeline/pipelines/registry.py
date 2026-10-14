@@ -59,6 +59,14 @@ def validate_pipeline_registration(
             if not isinstance(quality_config, dict):
                 raise ValueError("CSV quality configuration must be an object.")
             normalized_source["quality_config"] = quality_config
+        schema_config = source_config.get("schema_config")
+        if schema_config is not None:
+            if not isinstance(schema_config, dict):
+                raise ValueError("CSV schema configuration must be an object.")
+            normalized_source["schema_config"] = schema_config
+        for key in ("content_hash", "original_filename", "file_size_bytes"):
+            if key in source_config:
+                normalized_source[key] = source_config[key]
     else:
         url = str(source_config.get("url", "")).strip()
         parsed_url = urlparse(url) if url else None

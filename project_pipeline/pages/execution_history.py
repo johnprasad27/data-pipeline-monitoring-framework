@@ -13,7 +13,7 @@ import streamlit as st
 import config
 from database.db import Database
 from monitoring import metrics, queries
-from monitoring.dashboard import format_duration, format_failure_category
+from monitoring.dashboard import format_duration
 
 
 def load_styles() -> None:
@@ -48,6 +48,14 @@ def execution_history_page() -> None:
         unsafe_allow_html=True,
     )
 
+    # Initialize session state for interactive status filter
+    if "history_status_filter" not in st.session_state:
+        st.session_state["history_status_filter"] = "All Statuses"
+
+    def _on_status_card_click(target_status: str) -> None:
+        """Update the status filter in session state before widget re-instantiation."""
+        st.session_state["history_status_filter"] = target_status
+
     db = Database()
     try:
         db.connect()
@@ -69,24 +77,25 @@ def execution_history_page() -> None:
             pipeline_filter = st.selectbox(
                 "Pipeline",
                 ["All Pipelines", *all_pipeline_names],
-                index=0,
+                key="history_pipeline_filter",
             )
         with f2:
             status_filter = st.selectbox(
                 "Status",
                 ["All Statuses", "SUCCESS", "FAILED", "RUNNING", "RETRYING", "QUEUED"],
-                index=0,
+                key="history_status_filter",
             )
         with f3:
             time_filter = st.selectbox(
                 "Time Window",
                 ["All Time", "Last 1 Hour", "Last 6 Hours", "Last 24 Hours", "Last 7 Days", "Last 30 Days"],
-                index=0,
+                key="history_time_filter",
             )
         with f4:
             limit_filter = st.selectbox(
                 "Max Rows",
                 [50, 100, 250, 500],
+                key="history_limit_filter",
                 index=1,
             )
 
@@ -116,41 +125,289 @@ def execution_history_page() -> None:
             since=since_str,
         )
 
-        # Summary KPIs
+        # Summary KPIs calculated from the active filtered dataset
         total_runs = len(records)
         success_runs = sum(1 for r in records if (r.get("status") or "").upper() == "SUCCESS")
         failed_runs = sum(1 for r in records if (r.get("status") or "").upper() == "FAILED")
         total_rows = sum((r.get("rows_processed") or 0) for r in records)
 
+        # Visual highlighting states
+        current_status = st.session_state.get("history_status_filter", "All Statuses")
+        is_all_active = current_status in (None, "All Statuses")
+        is_success_active = current_status == "SUCCESS"
+        is_failed_active = current_status == "FAILED"
+
+        # Embedded styles scoped strictly to summary card buttons and info card
+        active_border_css = ""
+        if is_all_active:
+            active_border_css = """
+            .st-key-btn_kpi_all button {
+                border: 1.5px solid #3B82F6 !important;
+                box-shadow: 0 0 16px rgba(59, 130, 246, 0.45) !important;
+            }
+            """
+        elif is_success_active:
+            active_border_css = """
+            .st-key-btn_kpi_success button {
+                border: 1.5px solid #22C55E !important;
+                box-shadow: 0 0 16px rgba(34, 197, 94, 0.45) !important;
+            }
+            """
+        elif is_failed_active:
+            active_border_css = """
+            .st-key-btn_kpi_failed button {
+                border: 1.5px solid #EF4444 !important;
+                box-shadow: 0 0 16px rgba(239, 68, 68, 0.45) !important;
+            }
+            """
+
+        card_styles = f"""
+        <style>
+        /* Responsive flex row container for summary cards */
+        div[data-testid="stHorizontalBlock"]:has(.st-key-btn_kpi_all) {{
+            display: flex !important;
+            flex-wrap: wrap !important;
+            gap: 12px !important;
+            align-items: stretch !important;
+        }}
+        div[data-testid="stHorizontalBlock"]:has(.st-key-btn_kpi_all) > div[data-testid="stColumn"] {{
+            min-width: 180px !important;
+            flex: 1 1 180px !important;
+        }}
+
+        /* Clickable summary card buttons */
+        .st-key-btn_kpi_all button,
+        .st-key-btn_kpi_success button,
+        .st-key-btn_kpi_failed button {{
+            width: 100% !important;
+            min-height: 84px !important;
+            height: 84px !important;
+            padding: 12px 16px !important;
+            border-radius: 12px !important;
+            background: linear-gradient(180deg, #0F172A, #0B1625) !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            box-shadow: 0 4px 12px rgba(2, 6, 23, 0.4) !important;
+            display: flex !important;
+            flex-direction: row !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            text-align: left !important;
+            gap: 12px !important;
+            cursor: pointer !important;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+            box-sizing: border-box !important;
+        }}
+
+        .st-key-btn_kpi_all button:hover,
+        .st-key-btn_kpi_success button:hover,
+        .st-key-btn_kpi_failed button:hover {{
+            border-color: rgba(255, 255, 255, 0.25) !important;
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(2, 6, 23, 0.8) !important;
+        }}
+
+        .st-key-btn_kpi_all button:active,
+        .st-key-btn_kpi_success button:active,
+        .st-key-btn_kpi_failed button:active {{
+            transform: translateY(0);
+        }}
+
+        .st-key-btn_kpi_all button:focus,
+        .st-key-btn_kpi_success button:focus,
+        .st-key-btn_kpi_failed button:focus {{
+            outline: none !important;
+        }}
+
+        /* Button icon styling */
+        .st-key-btn_kpi_all button [data-testid="stIconMaterial"],
+        .st-key-btn_kpi_all button span:first-child,
+        .st-key-btn_kpi_success button [data-testid="stIconMaterial"],
+        .st-key-btn_kpi_success button span:first-child,
+        .st-key-btn_kpi_failed button [data-testid="stIconMaterial"],
+        .st-key-btn_kpi_failed button span:first-child {{
+            font-size: 20px !important;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 8px 10px;
+            border-radius: 8px;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            line-height: 1 !important;
+            margin: 0 !important;
+            flex-shrink: 0 !important;
+        }}
+
+        /* Button text layout */
+        .st-key-btn_kpi_all div[data-testid="stMarkdownContainer"],
+        .st-key-btn_kpi_success div[data-testid="stMarkdownContainer"],
+        .st-key-btn_kpi_failed div[data-testid="stMarkdownContainer"] {{
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: flex-start !important;
+            justify-content: center !important;
+            text-align: left !important;
+            width: 100% !important;
+            overflow: hidden !important;
+        }}
+
+        .st-key-btn_kpi_all div[data-testid="stMarkdownContainer"] p,
+        .st-key-btn_kpi_success div[data-testid="stMarkdownContainer"] p,
+        .st-key-btn_kpi_failed div[data-testid="stMarkdownContainer"] p {{
+            font-size: 12px !important;
+            font-weight: 500 !important;
+            color: #94A3B8 !important;
+            white-space: pre-line !important;
+            word-break: normal !important;
+            overflow-wrap: normal !important;
+            text-align: left !important;
+            line-height: 1.35 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }}
+
+        .st-key-btn_kpi_all div[data-testid="stMarkdownContainer"] strong,
+        .st-key-btn_kpi_success div[data-testid="stMarkdownContainer"] strong,
+        .st-key-btn_kpi_failed div[data-testid="stMarkdownContainer"] strong {{
+            display: block !important;
+            font-size: 22px !important;
+            font-weight: 800 !important;
+            color: #F8FAFC !important;
+            margin-top: 2px !important;
+            line-height: 1.2 !important;
+            white-space: normal !important;
+            word-break: normal !important;
+            overflow-wrap: normal !important;
+        }}
+
+        .st-key-btn_kpi_success div[data-testid="stMarkdownContainer"] strong {{
+            color: #22C55E !important;
+        }}
+
+        .st-key-btn_kpi_failed div[data-testid="stMarkdownContainer"] strong {{
+            color: #EF4444 !important;
+        }}
+
+        /* Non-clickable Rows Processed card */
+        .kpi-info-card {{
+            width: 100% !important;
+            min-height: 84px !important;
+            height: 84px !important;
+            padding: 12px 16px !important;
+            border-radius: 12px !important;
+            background: linear-gradient(180deg, #0F172A, #0B1625) !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            box-shadow: 0 4px 12px rgba(2, 6, 23, 0.4) !important;
+            box-sizing: border-box !important;
+            display: flex !important;
+            align-items: center !important;
+        }}
+        .kpi-card-inner {{
+            display: flex !important;
+            flex-direction: row !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            gap: 12px !important;
+            width: 100% !important;
+        }}
+        .kpi-icon-box {{
+            font-size: 20px !important;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 8px 10px;
+            border-radius: 8px;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            line-height: 1 !important;
+            flex-shrink: 0 !important;
+        }}
+        .kpi-text-box {{
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: flex-start !important;
+            justify-content: center !important;
+            text-align: left !important;
+            overflow: hidden !important;
+        }}
+        .kpi-card-title {{
+            font-size: 12px !important;
+            font-weight: 500 !important;
+            color: #94A3B8 !important;
+            margin: 0 !important;
+            line-height: 1.35 !important;
+            white-space: normal !important;
+            word-break: normal !important;
+            overflow-wrap: normal !important;
+        }}
+        .kpi-card-value {{
+            font-size: 22px !important;
+            font-weight: 800 !important;
+            color: #F8FAFC !important;
+            margin-top: 2px !important;
+            line-height: 1.2 !important;
+            white-space: normal !important;
+            word-break: normal !important;
+            overflow-wrap: normal !important;
+        }}
+
+        {active_border_css}
+        </style>
+        """
+        st.markdown(card_styles, unsafe_allow_html=True)
+
         kpi_cols = st.columns(4)
-        kpi_cols[0].markdown(
-            f"<div class='card kpi-card' style='width:100%'><div class='kpi-inline'>"
-            f"<div class='icon'>📋</div><div class='meta'>"
-            f"<div class='title'>Filtered Runs</div><div class='value'>{total_runs}</div>"
-            f"</div></div></div>",
-            unsafe_allow_html=True,
-        )
-        kpi_cols[1].markdown(
-            f"<div class='card kpi-card' style='width:100%'><div class='kpi-inline'>"
-            f"<div class='icon'>✅</div><div class='meta'>"
-            f"<div class='title'>Successful</div><div class='value' style='color:#22C55E'>{success_runs}</div>"
-            f"</div></div></div>",
-            unsafe_allow_html=True,
-        )
-        kpi_cols[2].markdown(
-            f"<div class='card kpi-card' style='width:100%'><div class='kpi-inline'>"
-            f"<div class='icon'>❌</div><div class='meta'>"
-            f"<div class='title'>Failed</div><div class='value' style='color:#EF4444'>{failed_runs}</div>"
-            f"</div></div></div>",
-            unsafe_allow_html=True,
-        )
-        kpi_cols[3].markdown(
-            f"<div class='card kpi-card' style='width:100%'><div class='kpi-inline'>"
-            f"<div class='icon'>📊</div><div class='meta'>"
-            f"<div class='title'>Rows Processed</div><div class='value'>{total_rows:,}</div>"
-            f"</div></div></div>",
-            unsafe_allow_html=True,
-        )
+
+        # Card 1: Filtered Runs (clickable -> clears status filter)
+        with kpi_cols[0]:
+            st.button(
+                f"Filtered Runs\n**{total_runs}**",
+                key="btn_kpi_all",
+                icon="📋",
+                use_container_width=True,
+                on_click=_on_status_card_click,
+                args=("All Statuses",),
+                help="Click to show all execution statuses",
+            )
+
+        # Card 2: Successful (clickable -> sets status to SUCCESS)
+        with kpi_cols[1]:
+            st.button(
+                f"Successful\n**{success_runs}**",
+                key="btn_kpi_success",
+                icon="✅",
+                use_container_width=True,
+                on_click=_on_status_card_click,
+                args=("SUCCESS",),
+                help="Click to filter by SUCCESS runs",
+            )
+
+        # Card 3: Failed (clickable -> sets status to FAILED)
+        with kpi_cols[2]:
+            st.button(
+                f"Failed\n**{failed_runs}**",
+                key="btn_kpi_failed",
+                icon="❌",
+                use_container_width=True,
+                on_click=_on_status_card_click,
+                args=("FAILED",),
+                help="Click to filter by FAILED runs",
+            )
+
+        # Card 4: Rows Processed (informational only)
+        with kpi_cols[3]:
+            st.markdown(
+                f"""
+                <div class='kpi-info-card'>
+                    <div class='kpi-card-inner'>
+                        <div class='kpi-icon-box'>📊</div>
+                        <div class='kpi-text-box'>
+                            <div class='kpi-card-title'>Rows Processed</div>
+                            <div class='kpi-card-value'>{total_rows:,}</div>
+                        </div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
         st.markdown("<div class='spacer'></div>", unsafe_allow_html=True)
 
@@ -168,22 +425,21 @@ def execution_history_page() -> None:
         table_rows: list[dict[str, Any]] = []
         for r in records:
             status_val = (r.get("status") or "").upper()
-            retries = r.get("retry_count") if r.get("retry_count") is not None else 0
-            failure_cat = format_failure_category(
-                status_val,
-                r.get("failure_category") or r.get("failure_type"),
-                retries,
-            )
 
-            # Preserve error details only for failed/retrying executions
+            # Failure category and error details must come from THAT execution's own record.
+            # For successful runs (or any run with no failure info), show "-" for failure category and error details.
             if status_val == "SUCCESS":
-                error_details = "—"
+                failure_cat = "-"
+                error_details = "-"
             elif status_val == "FAILED":
-                error_details = r.get("error_message") or "Execution failed"
+                failure_cat = str(r.get("failure_category") or r.get("failure_type") or "UNKNOWN")
+                error_details = str(r.get("error_message") or "-")
             elif status_val == "RETRYING":
-                error_details = r.get("error_message") or "Retrying..."
+                failure_cat = str(r.get("failure_category") or r.get("failure_type") or "UNKNOWN")
+                error_details = str(r.get("error_message") or "Retrying...")
             else:
-                error_details = "—"
+                failure_cat = "-"
+                error_details = "-"
 
             table_rows.append({
                 "Pipeline": r.get("pipeline_name") or "Unknown",

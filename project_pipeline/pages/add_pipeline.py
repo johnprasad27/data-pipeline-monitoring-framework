@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 import uuid
 from io import BytesIO
 from pathlib import Path
@@ -11,7 +13,12 @@ import streamlit as st
 
 import config
 from database.db import Database
-from pipelines.csv_quality import TARGET_FIELDS, default_csv_quality_config
+from pipelines.csv_quality import (
+    SUPPORTED_DATA_TYPES,
+    generate_schema_rows,
+    inspect_csv_source,
+    validate_schema_configuration,
+)
 from pipelines.registry import (
     delete_disabled_pipeline,
     initialize_pipeline_registry,
@@ -102,106 +109,175 @@ pipeline_type = st.segmented_control(
 
 uploaded_csv = None
 api_url = ""
-csv_quality_config = None
-csv_schema_error = None
+csv_inspection: dict | None = None
+csv_schema_config: dict | None = None
+csv_schema_error: str | None = None
+
 with st.container(border=True):
     st.subheader("Pipeline configuration")
-    csv_headers: list[str] = []
-    default_quality_config: dict = {}
     if pipeline_type == "CSV":
-        uploaded_csv = st.file_uploader("CSV file", type=["csv"])
+        uploaded_csv = st.file_uploader("CSV file", type=["csv"], key="uploaded_csv_uploader")
         if uploaded_csv is not None:
-            try:
-                csv_headers = list(
-                    pd.read_csv(BytesIO(uploaded_csv.getvalue()), nrows=0).columns
+            csv_inspection = inspect_csv_source(uploaded_csv.getvalue())
+            if not csv_inspection["valid"]:
+                csv_schema_error = csv_inspection.get("error") or "Invalid CSV file."
+                st.error(f"❌ {csv_schema_error}")
+            else:
+                file_hash = csv_inspection["content_hash"][:12]
+                st.session_state["last_csv_inspection"] = csv_inspection
+
+                # Quality / file stats
+                st.markdown(
+                    f"**Encoding:** `{csv_inspection['encoding']}` &nbsp;|&nbsp; "
+                    f"**Total Rows:** `{csv_inspection['total_rows']:,}` &nbsp;|&nbsp; "
+                    f"**Columns:** `{len(csv_inspection['headers'])}` &nbsp;|&nbsp; "
+                    f"**Duplicate Rows:** `{csv_inspection['duplicate_count']:,}`"
                 )
-                if not csv_headers:
-                    csv_schema_error = "CSV file must contain a header row."
-            except Exception as exc:
-                csv_schema_error = f"Unable to read CSV headers: {exc}"
+                for w in csv_inspection.get("warnings", []):
+                    st.warning(f"⚠️ {w}")
 
-        if csv_headers:
-            default_quality_config = default_csv_quality_config(csv_headers)
-            schema_key = str(abs(hash(tuple(csv_headers))))
-            st.markdown("**CSV schema and quality rules**")
-            required_columns = st.multiselect(
-                "Required source columns",
-                csv_headers,
-                default=csv_headers,
-                key=f"csv_required_columns_{schema_key}",
-            )
-            required_fields = st.multiselect(
-                "Required / non-null fields",
-                csv_headers,
-                default=csv_headers,
-                key=f"csv_required_fields_{schema_key}",
-            )
-            duplicate_key_columns = st.multiselect(
-                "Duplicate key columns (empty checks exact duplicate rows)",
-                csv_headers,
-                default=[],
-                key=f"csv_duplicate_keys_{schema_key}",
-            )
+                # Preview expander
+                preview_count = min(10, len(csv_inspection["preview_rows"]))
+                with st.expander(f"Data Preview (First {preview_count} rows)", expanded=False):
+                    st.dataframe(csv_inspection["preview_df"], hide_index=True, width="stretch")
 
-            expected_data_types = {}
-            for column in csv_headers:
-                type_options = ["text", "integer", "number", "date"]
-                inferred_type = default_quality_config["expected_data_types"][column]
-                type_columns = st.columns([2, 1])
-                type_columns[0].write(column)
-                expected_data_types[column] = type_columns[1].selectbox(
-                    f"Expected type for {column}",
-                    type_options,
-                    index=type_options.index(inferred_type),
-                    key=f"csv_type_{schema_key}_{column}",
-                    label_visibility="collapsed",
+                # Schema table
+                st.markdown("**Detected Column Schema & Type Configuration**")
+                st.caption(
+                    "Review inferred data types and required constraints. You can override expected types directly in the table."
                 )
 
-            field_mapping = {}
-            mapping_options = ["Select source column", *csv_headers]
-            for target in TARGET_FIELDS:
-                aliases = {
-                    "customer_name": ("customer_name", "customer_id"),
-                    "product_name": ("product_name", "product"),
-                    "quantity": ("quantity",),
-                    "amount": ("amount", "total_amount"),
-                    "sale_date": ("sale_date", "transaction_date"),
-                }[target]
-                inferred_source = default_quality_config["field_mapping"][target]
-                default_index = (
-                    mapping_options.index(inferred_source)
-                    if inferred_source in mapping_options
-                    else 0
-                )
-                selected_source = st.selectbox(
-                    f"{target} source column",
-                    mapping_options,
-                    index=default_index,
-                    key=f"csv_mapping_{schema_key}_{target}",
-                )
-                field_mapping[target] = (
-                    "" if selected_source == "Select source column" else selected_source
+                # Build schema rows using helper
+                initial_schema_records = [
+                    {
+                        "Column": col,
+                        "Inferred Type": csv_inspection["inferred_types"].get(col, "text"),
+                        "Expected Type": csv_inspection["inferred_types"].get(col, "text"),
+                        "Required": True,
+                        "Missing Values": csv_inspection["missing_counts"].get(col, 0),
+                    }
+                    for col in csv_inspection["headers"]
+                ]
+                schema_df = pd.DataFrame(initial_schema_records)
+
+                # Deriving widget key from file_hash guarantees fresh state for different files
+                editor_key = f"schema_editor_{file_hash}"
+                edited_schema_df = st.data_editor(
+                    schema_df,
+                    column_config={
+                        "Column": st.column_config.TextColumn("Column", disabled=True),
+                        "Inferred Type": st.column_config.TextColumn("Inferred Type", disabled=True),
+                        "Expected Type": st.column_config.SelectboxColumn(
+                            "Expected Type",
+                            options=list(SUPPORTED_DATA_TYPES),
+                            required=True,
+                        ),
+                        "Required": st.column_config.CheckboxColumn("Required / Non-Null", default=True),
+                        "Missing Values": st.column_config.NumberColumn("Missing Values", disabled=True),
+                    },
+                    hide_index=True,
+                    key=editor_key,
+                    width="stretch",
                 )
 
-            price_options = ["None", *csv_headers]
-            inferred_price = default_quality_config["price_column"]
-            price_index = price_options.index(inferred_price) if inferred_price in price_options else 0
-            price_column = st.selectbox(
-                "Unit price column (optional)",
-                price_options,
-                index=price_index,
-                key=f"csv_price_{schema_key}",
-            )
-            csv_quality_config = {
-                "source_columns": csv_headers,
-                "required_columns": required_columns,
-                "expected_data_types": expected_data_types,
-                "required_fields": required_fields,
-                "duplicate_key_columns": duplicate_key_columns,
-                "field_mapping": field_mapping,
-                "price_column": "" if price_column == "None" else price_column,
-                "total_amount_column": field_mapping["amount"],
-            }
+                # Unique key selection (single or composite)
+                unique_keys_key = f"unique_keys_{file_hash}"
+                selected_unique_keys = st.multiselect(
+                    "Unique Key / Identifier Columns (Single or Composite)",
+                    options=csv_inspection["headers"],
+                    default=[],
+                    key=unique_keys_key,
+                    help="Select column(s) that identify uniqueness. If multiple columns are chosen, they form a composite unique key.",
+                )
+
+                # Advanced optional rules
+                with st.expander("Advanced Column Rules (Optional formats, regex, ranges, allowed values)", expanded=False):
+                    st.caption(
+                        "Configure optional validation constraints per column. No rules are auto-applied."
+                    )
+                    rule_col = st.selectbox(
+                        "Select column to configure rules",
+                        options=["-- Select a column --", *csv_inspection["headers"]],
+                        key=f"adv_col_picker_{file_hash}",
+                    )
+                    adv_rules_store = st.session_state.setdefault(f"adv_rules_{file_hash}", {})
+
+                    if rule_col != "-- Select a column --":
+                        curr_rule = adv_rules_store.get(rule_col, {})
+                        r_col1, r_col2 = st.columns(2)
+                        with r_col1:
+                            r_regex = st.text_input(
+                                f"Regex pattern for {rule_col}",
+                                value=curr_rule.get("regex_pattern") or "",
+                                placeholder="e.g. ^[a-z0-9_]+$",
+                                key=f"regex_{file_hash}_{rule_col}",
+                            )
+                            r_date_fmt = st.text_input(
+                                f"Date format for {rule_col}",
+                                value=curr_rule.get("date_format") or "",
+                                placeholder="e.g. %Y-%m-%d",
+                                key=f"date_fmt_{file_hash}_{rule_col}",
+                            )
+                            r_severity = st.radio(
+                                f"Rule severity for {rule_col}",
+                                options=["ERROR", "WARNING"],
+                                index=0 if curr_rule.get("severity", "ERROR") == "ERROR" else 1,
+                                horizontal=True,
+                                key=f"severity_{file_hash}_{rule_col}",
+                                help="ERROR rejects invalid rows; WARNING logs the issue while accepting the row.",
+                            )
+                        with r_col2:
+                            r_min = st.text_input(
+                                f"Numeric minimum for {rule_col}",
+                                value=str(curr_rule.get("min_value")) if curr_rule.get("min_value") is not None else "",
+                                placeholder="e.g. 0",
+                                key=f"min_{file_hash}_{rule_col}",
+                            )
+                            r_max = st.text_input(
+                                f"Numeric maximum for {rule_col}",
+                                value=str(curr_rule.get("max_value")) if curr_rule.get("max_value") is not None else "",
+                                placeholder="e.g. 100",
+                                key=f"max_{file_hash}_{rule_col}",
+                            )
+                            r_allowed = st.text_input(
+                                f"Allowed values (comma-separated) for {rule_col}",
+                                value=", ".join(curr_rule.get("allowed_values", [])) if curr_rule.get("allowed_values") else "",
+                                placeholder="e.g. active, pending, closed",
+                                key=f"allowed_{file_hash}_{rule_col}",
+                            )
+
+                        # Update in session state store
+                        adv_rules_store[rule_col] = {
+                            "regex_pattern": r_regex.strip() if r_regex.strip() else None,
+                            "date_format": r_date_fmt.strip() if r_date_fmt.strip() else None,
+                            "min_value": float(r_min.strip()) if r_min.strip() else None,
+                            "max_value": float(r_max.strip()) if r_max.strip() else None,
+                            "allowed_values": [item.strip() for item in r_allowed.split(",") if item.strip()] if r_allowed.strip() else None,
+                            "severity": r_severity,
+                        }
+
+                # Construct final schema_config
+                columns_map = {}
+                adv_rules = st.session_state.get(f"adv_rules_{file_hash}", {})
+                for _, r in edited_schema_df.iterrows():
+                    c_name = str(r["Column"])
+                    c_adv = adv_rules.get(c_name, {})
+                    columns_map[c_name] = {
+                        "expected_type": str(r["Expected Type"]).lower(),
+                        "required": bool(r["Required"]),
+                        "unique": c_name in selected_unique_keys,
+                        "min_value": c_adv.get("min_value"),
+                        "max_value": c_adv.get("max_value"),
+                        "date_format": c_adv.get("date_format"),
+                        "regex_pattern": c_adv.get("regex_pattern"),
+                        "allowed_values": c_adv.get("allowed_values"),
+                        "severity": c_adv.get("severity", "ERROR"),
+                    }
+
+                csv_schema_config = {
+                    "columns": columns_map,
+                    "composite_unique_keys": [selected_unique_keys] if len(selected_unique_keys) > 1 else [],
+                }
 
     with st.form("register_pipeline_form"):
         pipeline_name = st.text_input("Pipeline name", placeholder="customer_pipeline")
@@ -232,28 +308,39 @@ if submitted:
         st.error(csv_schema_error)
     elif pipeline_type == "CSV" and uploaded_csv is None:
         st.error("CSV file is required.")
-    elif pipeline_type == "CSV" and csv_quality_config and any(
-        not source_column
-        for source_column in csv_quality_config["field_mapping"].values()
-    ):
-        st.error("Select a source column for each required sales field.")
     elif pipeline_type == "CSV" and uploaded_csv is not None and not uploaded_csv.getvalue():
         st.error("CSV file is empty.")
-    elif pipeline_type == "API" and not api_url.strip():
-        st.error("API URL is invalid.")
     elif pipeline_type == "CSV" and uploaded_csv is not None and not uploaded_csv.name.lower().endswith(".csv"):
         st.error("CSV file is required.")
+    elif pipeline_type == "API" and not api_url.strip():
+        st.error("API URL is invalid.")
     else:
+        # Validate schema configuration if CSV
+        if pipeline_type == "CSV" and csv_schema_config:
+            is_valid_cfg, cfg_err = validate_schema_configuration(
+                csv_schema_config,
+                available_columns=csv_inspection["headers"] if csv_inspection else None,
+            )
+            if not is_valid_cfg:
+                st.error(f"Invalid schema configuration: {cfg_err}")
+                st.stop()
+
         stored_file: Path | None = None
-        source_config: dict[str, str]
+        source_config: dict[str, Any]
         if pipeline_type == "CSV":
             storage_dir = config.BASE_DIR / "data" / "storage"
             storage_dir.mkdir(parents=True, exist_ok=True)
-            stored_file = storage_dir / f"{uuid.uuid4().hex}.csv"
+            safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", name) or "csv_pipeline"
+            content_hash = csv_inspection["content_hash"] if csv_inspection else hashlib.sha256(uploaded_csv.getvalue()).hexdigest()
+            file_name = f"{safe_name}_{content_hash[:12]}_{uuid.uuid4().hex[:8]}.csv"
+            stored_file = storage_dir / file_name
             stored_file.write_bytes(uploaded_csv.getvalue())
             source_config = {
                 "file_path": stored_file.relative_to(config.BASE_DIR).as_posix(),
-                "quality_config": csv_quality_config,
+                "original_filename": uploaded_csv.name,
+                "content_hash": content_hash,
+                "file_size_bytes": csv_inspection["file_size_bytes"] if csv_inspection else len(uploaded_csv.getvalue()),
+                "schema_config": csv_schema_config,
             }
         else:
             source_config = {"url": api_url.strip()}

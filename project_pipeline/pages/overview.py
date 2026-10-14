@@ -41,17 +41,6 @@ def _display_timestamp(row: dict) -> str:
     return "-"
 
 
-def _bar(label: str, count: int, percentage: float, color: str, symbol: str) -> str:
-    width = min(max(float(percentage), 0.0), 100.0)
-    return (
-        "<div style='margin-bottom:0.45rem;'>"
-        "<div style='display:flex;justify-content:space-between;align-items:center;"
-        "color:#F8FAFC;margin-bottom:0.18rem;font-size:0.84rem;'>"
-        f"<span>{symbol} {html.escape(label)}</span><span>{count} &nbsp; {percentage:.1f}%</span></div>"
-        "<div style='height:8px;background:#1E293B;border-radius:999px;overflow:hidden;'>"
-        f"<div style='height:100%;width:{width}%;background:{color};border-radius:999px;'></div>"
-        "</div></div>"
-    )
 
 
 with st.sidebar:
@@ -138,20 +127,6 @@ def overview_page() -> None:
                 unsafe_allow_html=True,
             )
 
-        st.markdown("<div style='font-size:1.08rem; font-weight:700; margin-top: 1.2rem; margin-bottom: 0.65rem;'>Pipeline Runs</div>", unsafe_allow_html=True)
-        for pipeline in summary["pipeline_run_counts"]:
-            st.markdown(
-                f"<div style='border:1px solid #1F2937;background:#0F172A;border-radius:10px;"
-                "padding:0.75rem 0.85rem;margin-bottom:0.65rem;'>"
-                f"<div style='font-weight:700;color:#F8FAFC;margin-bottom:0.55rem;'>{html.escape(pipeline['pipeline_name'])}"
-                f"<span style='float:right;color:#94A3B8;font-size:0.8rem;'>{pipeline['total']} total</span></div>"
-                + _bar("Queued", pipeline["queued"], pipeline["queued_pct"], "#64748B", "·")
-                + _bar("Running", pipeline["running"], pipeline["running_pct"], "#06B6D4", "↻")
-                + _bar("Success", pipeline["success"], pipeline["success_pct"], "#22C55E", "✓")
-                + _bar("Failed", pipeline["failed"], pipeline["failed_pct"], "#EF4444", "✕")
-                + "</div>",
-                unsafe_allow_html=True,
-            )
 
         task_summary = summary["task_summary"]
         st.markdown(

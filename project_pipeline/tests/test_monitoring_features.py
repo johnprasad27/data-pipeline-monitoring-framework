@@ -644,20 +644,27 @@ def test_products_api_pipeline_registration_and_runner_resolution():
 
 
 def test_app_navigation_includes_execution_history_page():
-    """Verify that app.py registers all four pages and each appears exactly once."""
+    """Verify that app.py registers all five pages and each appears exactly once."""
     from pathlib import Path
     import app
 
-    assert len(app.pages) == 4
+    assert len(app.pages) == 5
 
     app_text = Path(app.__file__).read_text(encoding="utf-8")
     assert 'st.Page("pages/overview.py", title="Overview"' in app_text
+    assert 'st.Page("pages/pipeline_runs.py", title="Pipeline Runs"' in app_text
     assert 'st.Page("monitoring/dashboard.py", title="Pipeline Monitor"' in app_text
     assert 'st.Page("pages/execution_history.py", title="Execution History"' in app_text
     assert 'st.Page("pages/add_pipeline.py", title="Add Pipeline"' in app_text
 
     base_dir = Path(app.__file__).parent
-    for page_path in ["pages/overview.py", "monitoring/dashboard.py", "pages/execution_history.py", "pages/add_pipeline.py"]:
+    for page_path in [
+        "pages/overview.py",
+        "pages/pipeline_runs.py",
+        "monitoring/dashboard.py",
+        "pages/execution_history.py",
+        "pages/add_pipeline.py",
+    ]:
         assert (base_dir / page_path).is_file()
 
 
@@ -753,3 +760,153 @@ def test_execution_history_formatting_preserves_failures_and_cleans_success():
     assert format_failure_category(
         recovered_item["status"], recovered_item["failure_category"], recovered_item["retry_count"]
     ) == "Recovered (NETWORK_ERROR)"
+
+
+def test_failed_executions_section_removed_from_pipeline_monitor():
+    """Verify that Failed Executions section and cards are not in monitoring/dashboard.py."""
+    from pathlib import Path
+
+    dashboard_file = Path(__file__).resolve().parents[1] / "monitoring" / "dashboard.py"
+    content = dashboard_file.read_text(encoding="utf-8")
+    assert "Failed Executions" not in content
+    assert "No failed executions for this pipeline" not in content
+
+
+def test_execution_history_table_row_formatting():
+    """Verify table row formatting for Execution History matches task requirements."""
+    from monitoring.dashboard import format_duration
+
+    # Sample records
+    records = [
+        {
+            "execution_id": 101,
+            "pipeline_name": "api_pipeline",
+            "status": "SUCCESS",
+            "rows_processed": 150,
+            "failure_category": None,
+            "error_message": None,
+            "created_at": "2026-10-14 10:00:00",
+            "execution_duration_seconds": 1.25,
+        },
+        {
+            "execution_id": 102,
+            "pipeline_name": "csv_pipeline",
+            "status": "FAILED",
+            "rows_processed": 0,
+            "failure_category": "FILE_ERROR",
+            "error_message": "CSV file not found: missing.csv",
+            "created_at": "2026-10-14 10:05:00",
+            "execution_duration_seconds": 0.45,
+        },
+        {
+            "execution_id": 103,
+            "pipeline_name": "products_pipeline",
+            "status": "FAILED",
+            "rows_processed": 0,
+            "failure_category": None,
+            "failure_type": "UNKNOWN",
+            "error_message": None,
+            "created_at": "2026-10-14 10:10:00",
+            "execution_duration_seconds": 0.10,
+        },
+    ]
+
+    table_rows = []
+    for r in records:
+        status_val = (r.get("status") or "").upper()
+        if status_val == "SUCCESS":
+            failure_cat = "-"
+            error_details = "-"
+        elif status_val == "FAILED":
+            failure_cat = str(r.get("failure_category") or r.get("failure_type") or "UNKNOWN")
+            error_details = str(r.get("error_message") or "-")
+        else:
+            failure_cat = "-"
+            error_details = "-"
+
+        table_rows.append({
+            "Pipeline": r.get("pipeline_name") or "Unknown",
+            "Status": status_val,
+            "Rows": r.get("rows_processed") if r.get("rows_processed") is not None else 0,
+            "Duration": format_duration(r),
+            "Failure Category": failure_cat,
+            "Error Details": error_details,
+            "Execution Time": str(r.get("created_at") or r.get("start_time") or ""),
+        })
+
+    # Expected column set
+    expected_cols = ["Pipeline", "Status", "Rows", "Duration", "Failure Category", "Error Details", "Execution Time"]
+    assert list(table_rows[0].keys()) == expected_cols
+
+    # SUCCESS run has "-" for failure category and error details
+    assert table_rows[0]["Status"] == "SUCCESS"
+    assert table_rows[0]["Failure Category"] == "-"
+    assert table_rows[0]["Error Details"] == "-"
+
+    # FAILED run with category & error message
+    assert table_rows[1]["Status"] == "FAILED"
+    assert table_rows[1]["Failure Category"] == "FILE_ERROR"
+    assert table_rows[1]["Error Details"] == "CSV file not found: missing.csv"
+
+    # FAILED run with fallback
+    assert table_rows[2]["Status"] == "FAILED"
+    assert table_rows[2]["Failure Category"] == "UNKNOWN"
+    assert table_rows[2]["Error Details"] == "-"
+
+
+def test_pipeline_runs_section_moved_from_overview_to_pipeline_runs_page():
+    """Verify that Pipeline Runs section is not in pages/overview.py and is in pages/pipeline_runs.py."""
+    from pathlib import Path
+
+    base_dir = Path(__file__).resolve().parents[1]
+    overview_text = (base_dir / "pages" / "overview.py").read_text(encoding="utf-8")
+    pipeline_runs_text = (base_dir / "pages" / "pipeline_runs.py").read_text(encoding="utf-8")
+
+    # Section header should not be in overview.py
+    assert "for pipeline in summary[\"pipeline_run_counts\"]:" not in overview_text
+    assert "def _bar(" not in overview_text
+
+    # Section should be rendered via render_pipeline_runs in pipeline_runs.py
+    assert "render_pipeline_runs(pipeline_run_counts)" in pipeline_runs_text
+    assert "st.markdown(\"<h1 style='margin-bottom: 0.1rem;'>Pipeline Runs</h1>\"" in pipeline_runs_text
+
+
+def test_render_bar_and_render_pipeline_runs():
+    """Verify render_bar and render_pipeline_runs helper functions."""
+    from unittest.mock import patch
+    import streamlit as st
+    from monitoring.overview import render_bar, render_pipeline_runs
+
+    # Test render_bar
+    bar_html = render_bar("Success", 10, 50.0, "#22C55E", "✓")
+    assert "Success" in bar_html
+    assert "10" in bar_html
+    assert "50.0%" in bar_html
+    assert "#22C55E" in bar_html
+    assert "width:50.0%" in bar_html
+
+    # Test render_pipeline_runs with data
+    rendered_markdowns = []
+    with patch.object(st, "markdown", side_effect=lambda content, **kwargs: rendered_markdowns.append(content)):
+        render_pipeline_runs([
+            {
+                "pipeline_name": "test_pipeline",
+                "total": 10,
+                "queued": 1,
+                "queued_pct": 10.0,
+                "running": 2,
+                "running_pct": 20.0,
+                "success": 5,
+                "success_pct": 50.0,
+                "failed": 2,
+                "failed_pct": 20.0,
+            }
+        ])
+    assert any("test_pipeline" in m for m in rendered_markdowns)
+    assert any("10 total" in m for m in rendered_markdowns)
+
+    # Test render_pipeline_runs empty state
+    empty_markdowns = []
+    with patch.object(st, "markdown", side_effect=lambda content, **kwargs: empty_markdowns.append(content)):
+        render_pipeline_runs([])
+    assert any("No registered pipelines found" in m for m in empty_markdowns)

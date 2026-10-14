@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import html
 from datetime import datetime, timedelta
 from typing import Any, Iterable
+
+import streamlit as st
 
 from monitoring import queries
 
@@ -149,6 +152,60 @@ def build_pipeline_run_counts(
             "retrying_pct": round(c["RETRYING"] / total * 100, 2) if total else 0.0,
         })
     return result
+
+
+def render_bar(label: str, count: int, percentage: float, color: str, symbol: str) -> str:
+    """Render an HTML progress bar for a status category with symbol, label, count, and percentage."""
+    width = min(max(float(percentage), 0.0), 100.0)
+    return (
+        "<div style='margin-bottom:0.45rem;'>"
+        "<div style='display:flex;justify-content:space-between;align-items:center;"
+        "color:#F8FAFC;margin-bottom:0.18rem;font-size:0.84rem;'>"
+        f"<span>{symbol} {html.escape(label)}</span><span>{count} &nbsp; {percentage:.1f}%</span></div>"
+        "<div style='height:8px;background:#1E293B;border-radius:999px;overflow:hidden;'>"
+        f"<div style='height:100%;width:{width}%;background:{color};border-radius:999px;'></div>"
+        "</div></div>"
+    )
+
+
+def render_pipeline_runs(pipeline_run_counts: list[dict[str, Any]]) -> None:
+    """Render individual pipeline cards with status counts and progress bars."""
+    st.markdown("<div style='font-size:1.08rem; font-weight:700; margin-bottom: 0.65rem;'>Pipeline Runs</div>", unsafe_allow_html=True)
+    if not pipeline_run_counts:
+        st.markdown(
+            "<div class='card' style='text-align:center; padding: 2rem 1rem; color: #94A3B8; margin-top: 0.5rem;'>"
+            "<div style='font-size: 1.8rem; margin-bottom: 0.4rem;'>ℹ️</div>"
+            "<div style='font-size: 1rem; font-weight: 600; color: #F8FAFC;'>No registered pipelines found</div>"
+            "<div style='font-size: 0.85rem; margin-top: 0.2rem;'>Register a pipeline using the Add Pipeline page to start monitoring runs.</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    for pipeline in pipeline_run_counts:
+        total = pipeline.get("total", 0)
+        pname = pipeline.get("pipeline_name", "Unknown")
+        queued = pipeline.get("queued", 0)
+        queued_pct = pipeline.get("queued_pct", 0.0)
+        running = pipeline.get("running", 0)
+        running_pct = pipeline.get("running_pct", 0.0)
+        success = pipeline.get("success", 0)
+        success_pct = pipeline.get("success_pct", 0.0)
+        failed = pipeline.get("failed", 0)
+        failed_pct = pipeline.get("failed_pct", 0.0)
+
+        card_html = (
+            f"<div style='border:1px solid #1F2937;background:#0F172A;border-radius:10px;"
+            "padding:0.75rem 0.85rem;margin-bottom:0.65rem;'>"
+            f"<div style='font-weight:700;color:#F8FAFC;margin-bottom:0.55rem;'>{html.escape(pname)}"
+            f"<span style='float:right;color:#94A3B8;font-size:0.8rem;'>{total} total</span></div>"
+            + render_bar("Queued", queued, queued_pct, "#64748B", "·")
+            + render_bar("Running", running, running_pct, "#06B6D4", "↻")
+            + render_bar("Success", success, success_pct, "#22C55E", "✓")
+            + render_bar("Failed", failed, failed_pct, "#EF4444", "✕")
+            + "</div>"
+        )
+        st.markdown(card_html, unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------ #

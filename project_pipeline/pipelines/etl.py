@@ -278,3 +278,95 @@ def load_sales_data(
     except Exception as e:
         db.connection.rollback()
         raise ETLError(f"Load failed: {e}") from e
+
+
+def load_generic_data(
+    records: list[dict[str, Any]],
+    db: Any,
+    execution_id: int | None = None,
+    pipeline_name: str = "generic_csv",
+    progress_callback: Callable[[int], None] | None = None,
+) -> int:
+    """
+    Load generic CSV row payloads into pipeline_generic_data table.
+    Uses parameterized SQL without interpolating any user-provided column names.
+    """
+    if not records:
+        logger.info("No generic data to load")
+        return 0
+
+    import json
+    try:
+        rows_loaded = 0
+        for idx, row in enumerate(records, start=1):
+            query = """
+                INSERT INTO pipeline_generic_data
+                (execution_id, pipeline_name, row_number, data)
+                VALUES (%s, %s, %s, %s::jsonb)
+            """
+            params = (
+                execution_id,
+                pipeline_name,
+                idx,
+                json.dumps(row, default=str),
+            )
+            db.execute(query, params, commit=False)
+            rows_loaded += 1
+            if progress_callback is not None:
+                progress_callback(rows_loaded)
+
+        if getattr(db, "connection", None):
+            db.connection.commit()
+        logger.info("Successfully loaded %d rows into pipeline_generic_data", rows_loaded)
+        return rows_loaded
+    except Exception as e:
+        if getattr(db, "connection", None):
+            try:
+                db.connection.rollback()
+            except Exception:
+                pass
+        raise ETLError(f"Generic load failed: {e}") from e
+
+
+def load_rejected_rows(
+    rejected_records: list[dict[str, Any]],
+    db: Any,
+    execution_id: int | None = None,
+    pipeline_name: str = "generic_csv",
+) -> int:
+    """
+    Persist rejected row audit records into pipeline_rejected_rows table.
+    """
+    if not rejected_records:
+        return 0
+
+    import json
+    try:
+        count = 0
+        for item in rejected_records:
+            query = """
+                INSERT INTO pipeline_rejected_rows
+                (execution_id, pipeline_name, row_number, raw_data, rejection_reasons)
+                VALUES (%s, %s, %s, %s::jsonb, %s::jsonb)
+            """
+            params = (
+                execution_id,
+                pipeline_name,
+                item.get("row_number", count + 1),
+                json.dumps(item.get("raw_data", {}), default=str),
+                json.dumps(item.get("rejection_reasons", []), default=str),
+            )
+            db.execute(query, params, commit=False)
+            count += 1
+        if getattr(db, "connection", None):
+            db.connection.commit()
+        logger.info("Persisted %d rejected rows into pipeline_rejected_rows", count)
+        return count
+    except Exception as e:
+        if getattr(db, "connection", None):
+            try:
+                db.connection.rollback()
+            except Exception:
+                pass
+        logger.warning("Failed to persist rejected rows audit: %s", e)
+        return 0

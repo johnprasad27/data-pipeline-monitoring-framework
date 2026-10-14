@@ -533,49 +533,6 @@ def main() -> None:
         except Exception:
             st.info('Charts unavailable')
 
-        st.markdown("<div class='spacer'></div>", unsafe_allow_html=True)
-
-        if selected_pipeline is None:
-            st.subheader('Failed Executions')
-            failed_runs = [r for r in (metrics.get_execution_history(db, limit=200) or []) if (r.get('status') or '').upper() == 'FAILED']
-            if failed_runs:
-                for r in failed_runs[:10]:
-                    exec_id = r.get('execution_id')
-                    exec_label = f"Execution #{exec_id} &nbsp; " if exec_id else ""
-                    st.markdown(
-                        f"<div class='card'>"
-                        f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
-                        f"<div><strong>{r.get('pipeline_name')}</strong> <span class='status-pill status-failed' style='margin-left:6px; font-size:10px;'>FAILED</span></div>"
-                        f"<div class='muted small'>{exec_label}{r.get('created_at')}</div>"
-                        f"</div>"
-                        f"<div style='margin-top:0.4rem;'><strong>Failure Category:</strong> {r.get('failure_category') or r.get('failure_type') or 'UNKNOWN'}</div>"
-                        f"<div style='color:var(--danger); margin-top:0.2rem;'>{r.get('error_message') or ''}</div>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-            else:
-                st.markdown("<div class='card'><div style='text-align:center'>🎉 No failed pipelines.<br/>All pipelines executed successfully.</div></div>", unsafe_allow_html=True)
-        else:
-            st.subheader('Failed Executions')
-            failed_runs = metrics.get_pipeline_failures(db, selected_pipeline, limit=20)
-            if failed_runs:
-                for r in failed_runs[:10]:
-                    exec_id = r.get('execution_id')
-                    exec_label = f"Execution #{exec_id} &nbsp; " if exec_id else ""
-                    st.markdown(
-                        f"<div class='card'>"
-                        f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
-                        f"<div><strong>{r.get('pipeline_name')}</strong> <span class='status-pill status-failed' style='margin-left:6px; font-size:10px;'>FAILED</span></div>"
-                        f"<div class='muted small'>{exec_label}{r.get('created_at')}</div>"
-                        f"</div>"
-                        f"<div style='margin-top:0.4rem;'><strong>Failure Category:</strong> {r.get('failure_category') or r.get('failure_type') or 'UNKNOWN'}</div>"
-                        f"<div style='color:var(--danger); margin-top:0.2rem;'>{r.get('error_message') or ''}</div>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-            else:
-                st.markdown("<div class='card'><div style='text-align:center'>🎉 No failed executions for this pipeline.</div></div>", unsafe_allow_html=True)
-
     except Exception as e:
         st.error(f"Dashboard error: {e}")
     finally:

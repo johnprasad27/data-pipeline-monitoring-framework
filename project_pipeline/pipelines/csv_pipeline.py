@@ -19,11 +19,17 @@ import config
 from database.db import Database, DatabaseError
 from pipelines.etl import (
     ETLError,
+    load_generic_data,
+    load_rejected_rows,
     load_sales_data,
     read_csv,
     transform_sales_data,
 )
-from pipelines.csv_quality import finalize_csv_quality, validate_csv_data
+from pipelines.csv_quality import (
+    finalize_csv_quality,
+    validate_csv_data,
+    validate_generic_csv_data,
+)
 from monitoring.freshness import calculate_pipeline_health, get_freshness_status
 from monitoring.execution import execution_history_managed
 from pipelines.failure_handling import classify_failure
@@ -191,33 +197,75 @@ def run_csv_pipeline(
         source_frame = read_csv(csv_path)
         _log_task("Extract", "SUCCESS", t0)
 
-        # Validate
-        t0 = datetime.now()
-        df, quality_report = validate_csv_data(
-            source_frame,
-            (source_config or {}).get("quality_config"),
-        )
-        data_quality_score = (
-            round(quality_report["valid_rows"] * 100 / quality_report["input_rows"], 2)
-            if quality_report["input_rows"]
-            else 100.0
-        )
-        if quality_report["data_quality_status"] == "FAIL":
-            _log_task("Validate", "FAILED", t0, "; ".join(quality_report["reasons"]) or "CSV schema validation failed")
-            raise ETLError("; ".join(quality_report["reasons"]) or "CSV schema validation failed")
-        _log_task("Validate", "SUCCESS", t0)
-        
-        # Transform: Apply transformations
-        t0 = datetime.now()
-        df = transform_sales_data(df)
-        _log_task("Transform", "SUCCESS", t0)
-        
-        # Load in one transaction so loaded-row counts match committed rows.
-        t0 = datetime.now()
-        rows_processed = load_sales_data(df, db)
-        if quality_report["reasons"] and not error_message:
-            logger.warning("CSV rows rejected: %s", "; ".join(quality_report["reasons"]))
-        _log_task("Load", "SUCCESS", t0)
+        # Check if generic schema_config is present
+        schema_config = (source_config or {}).get("schema_config")
+        if schema_config:
+            # Validate using generic schema rules
+            t0 = datetime.now()
+            valid_rows_data, rejected_rows_data, quality_report = validate_generic_csv_data(
+                source_frame,
+                schema_config,
+            )
+            data_quality_score = (
+                round(quality_report["valid_rows"] * 100 / quality_report["input_rows"], 2)
+                if quality_report["input_rows"]
+                else 100.0
+            )
+            if quality_report["data_quality_status"] == "FAIL":
+                _log_task("Validate", "FAILED", t0, "; ".join(quality_report["reasons"]) or "CSV schema validation failed")
+                raise ETLError("; ".join(quality_report["reasons"]) or "CSV schema validation failed")
+            _log_task("Validate", "SUCCESS", t0)
+
+            # Transform: formatting already completed during generic validation
+            t0 = datetime.now()
+            _log_task("Transform", "SUCCESS", t0)
+
+            # Load into generic storage table and persist rejected rows
+            t0 = datetime.now()
+            rows_processed = load_generic_data(
+                valid_rows_data,
+                db,
+                execution_id=execution_id,
+                pipeline_name=pipeline_name,
+            )
+            if rejected_rows_data:
+                load_rejected_rows(
+                    rejected_rows_data,
+                    db,
+                    execution_id=execution_id,
+                    pipeline_name=pipeline_name,
+                )
+            if quality_report["reasons"] and not error_message:
+                logger.warning("CSV rows rejected: %s", "; ".join(quality_report["reasons"]))
+            _log_task("Load", "SUCCESS", t0)
+        else:
+            # Legacy fallback: use existing validate_csv_data, transform_sales_data, load_sales_data
+            t0 = datetime.now()
+            df, quality_report = validate_csv_data(
+                source_frame,
+                (source_config or {}).get("quality_config"),
+            )
+            data_quality_score = (
+                round(quality_report["valid_rows"] * 100 / quality_report["input_rows"], 2)
+                if quality_report["input_rows"]
+                else 100.0
+            )
+            if quality_report["data_quality_status"] == "FAIL":
+                _log_task("Validate", "FAILED", t0, "; ".join(quality_report["reasons"]) or "CSV schema validation failed")
+                raise ETLError("; ".join(quality_report["reasons"]) or "CSV schema validation failed")
+            _log_task("Validate", "SUCCESS", t0)
+
+            # Transform: Apply transformations
+            t0 = datetime.now()
+            df = transform_sales_data(df)
+            _log_task("Transform", "SUCCESS", t0)
+
+            # Load in one transaction so loaded-row counts match committed rows.
+            t0 = datetime.now()
+            rows_processed = load_sales_data(df, db)
+            if quality_report["reasons"] and not error_message:
+                logger.warning("CSV rows rejected: %s", "; ".join(quality_report["reasons"]))
+            _log_task("Load", "SUCCESS", t0)
 
         status = "SUCCESS"
         logger.info("CSV pipeline completed: %s rows loaded", rows_processed)
